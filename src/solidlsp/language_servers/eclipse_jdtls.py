@@ -22,6 +22,7 @@ from overrides import override
 
 from solidlsp import ls_types
 from solidlsp.dependency_provider import DownloadedDependency, DownloadedDependencyHashDatabase
+from solidlsp.language_servers.eclipse_jdtls_workspace import JdtlsWorkspace
 from solidlsp.ls import LanguageServerDependencyProvider, LSPFileBuffer, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
@@ -207,6 +208,26 @@ class EclipseJDTLS(SolidLanguageServer):
         self._service_ready_event = threading.Event()
         self._project_ready_event = threading.Event()
 
+    @property
+    def _jdtls_workspace(self) -> JdtlsWorkspace:
+        assert isinstance(self._dependency_provider, self.DependencyProvider)
+        return self._dependency_provider.workspace
+
+    @override
+    def stop(self, shutdown_timeout: float = 15.0) -> None:
+        """
+        Stops the language server, allowing it substantially more time than other language servers
+        to shut down, and relinquishes its workspace so that another process can claim it.
+
+        Eclipse persists its workspace while shutting down, and the more of that work it completes,
+        the less unsaved state the next session has to discard. The timeout only improves the odds,
+        however; correctness under an abrupt termination is established on the startup side, by
+        :meth:`JdtlsWorkspace.discard_unsaved_state`.
+        """
+        super().stop(shutdown_timeout)
+        if isinstance(self._dependency_provider, self.DependencyProvider):
+            self._dependency_provider.release_workspace()
+
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
         ls_resources_dir = self.ls_resources_dir(self._solidlsp_settings)
         return self.DependencyProvider(self._custom_settings, ls_resources_dir, self._solidlsp_settings, self.repository_root_path)
@@ -271,6 +292,7 @@ class EclipseJDTLS(SolidLanguageServer):
             self._solidlsp_settings = solidlsp_settings
             self._repository_root_path = repository_root_path
             self.runtime_dependency_paths = self._setup_runtime_dependencies(ls_resources_dir, custom_settings)
+            self._workspace: JdtlsWorkspace | None = None
 
         @classmethod
         def _create_dep_gradle(cls, gradle_version: str | None = None) -> DownloadedDependency:
@@ -723,26 +745,37 @@ class EclipseJDTLS(SolidLanguageServer):
                 ws_hash_input = (repository_root_path + "|" + jdtls_launcher_jar_path + "|" + workspace_settings_json).encode()
             return hashlib.md5(ws_hash_input).hexdigest()
 
-        def create_launch_command(self) -> list[str]:
-            # ws_dir is the workspace directory for the EclipseJDTLS server.
-            project_hash = EclipseJDTLS.DependencyProvider._compute_workspace_hash(
-                self._repository_root_path,
-                self.runtime_dependency_paths.jdtls_launcher_jar_path,
-                self._custom_settings,
-            )
-            ws_dir = str(
-                PurePath(
-                    self._solidlsp_settings.ls_resources_dir,
-                    "EclipseJDTLS",
-                    "workspaces",
-                    project_hash,
+        @property
+        def workspace(self) -> JdtlsWorkspace:
+            """
+            The Eclipse workspace exclusively owned by this process, acquired on first access.
+            """
+            if self._workspace is None:
+                project_hash = self._compute_workspace_hash(
+                    self._repository_root_path,
+                    self.runtime_dependency_paths.jdtls_launcher_jar_path,
+                    self._custom_settings,
                 )
-            )
+                workspaces_root = str(PurePath(self._solidlsp_settings.ls_resources_dir, "EclipseJDTLS", "workspaces"))
+                self._workspace = JdtlsWorkspace.acquire(
+                    workspaces_root, project_hash, self.runtime_dependency_paths.jdtls_readonly_config_path
+                )
+            return self._workspace
+
+        def release_workspace(self) -> None:
+            """
+            Relinquishes the Eclipse workspace, if one is held.
+            """
+            if self._workspace is not None:
+                self._workspace.release()
+                self._workspace = None
+
+        def create_launch_command(self) -> list[str]:
+            workspace = self.workspace
 
             # shared_cache_location is the global cache used by Eclipse JDTLS across all workspaces
             shared_cache_location = str(PurePath(self._solidlsp_settings.ls_resources_dir, "lsp", "EclipseJDTLS", "sharedIndex"))
             os.makedirs(shared_cache_location, exist_ok=True)
-            os.makedirs(ws_dir, exist_ok=True)
 
             jre_path = self.runtime_dependency_paths.jre_path
             lombok_jar_path = self.runtime_dependency_paths.lombok_jar_path
@@ -751,13 +784,10 @@ class EclipseJDTLS(SolidLanguageServer):
             jdtls_xmx = self._custom_settings.get("jdtls_xmx", "3G")
             jdtls_xms = self._custom_settings.get("jdtls_xms", "100m")
 
-            data_dir = str(PurePath(ws_dir, "data_dir"))
-            jdtls_config_path = str(PurePath(ws_dir, "config_path"))
+            data_dir = workspace.data_dir
+            jdtls_config_path = workspace.config_path
 
             jdtls_readonly_config_path = self.runtime_dependency_paths.jdtls_readonly_config_path
-
-            if not os.path.exists(jdtls_config_path):
-                shutil.copytree(jdtls_readonly_config_path, jdtls_config_path)
 
             for static_path in [
                 jre_path,
@@ -1323,44 +1353,68 @@ class EclipseJDTLS(SolidLanguageServer):
         def do_nothing(params: dict) -> None:
             return
 
-        self.server.on_request("client/registerCapability", register_capability_handler)
-        self.server.on_notification("language/status", lang_status_handler)
-        self.server.on_notification("window/logMessage", window_log_message)
-        self.server.on_request("workspace/executeClientCommand", execute_client_command_handler)
-        self.server.on_notification("$/progress", do_nothing)
-        self.server.on_notification("textDocument/publishDiagnostics", do_nothing)
-        self.server.on_notification("language/actionableNotification", do_nothing)
+        def attempt_startup() -> None:
+            self.server.on_request("client/registerCapability", register_capability_handler)
+            self.server.on_notification("language/status", lang_status_handler)
+            self.server.on_notification("window/logMessage", window_log_message)
+            self.server.on_request("workspace/executeClientCommand", execute_client_command_handler)
+            self.server.on_notification("$/progress", do_nothing)
+            self.server.on_notification("textDocument/publishDiagnostics", do_nothing)
+            self.server.on_notification("language/actionableNotification", do_nothing)
 
-        log.info("Starting EclipseJDTLS server process")
-        self.server.start()
-        initialize_params = self._create_initialize_params()
+            log.info("Starting EclipseJDTLS server process")
+            self.server.start()
+            initialize_params = self._create_initialize_params()
 
-        log.info("Sending initialize request from LSP client to LSP server and awaiting response")
-        init_response = self.server.send.initialize(initialize_params)
-        assert init_response["capabilities"]["textDocumentSync"]["change"] == 2  # type: ignore
-        assert "completionProvider" not in init_response["capabilities"]
-        assert "executeCommandProvider" not in init_response["capabilities"]
+            log.info("Sending initialize request from LSP client to LSP server and awaiting response")
+            init_response = self.server.send.initialize(initialize_params)
+            assert init_response["capabilities"]["textDocumentSync"]["change"] == 2  # type: ignore
+            assert "completionProvider" not in init_response["capabilities"]
+            assert "executeCommandProvider" not in init_response["capabilities"]
 
-        self.server.notify.initialized({})
+            self.server.notify.initialized({})
 
-        self.server.notify.workspace_did_change_configuration({"settings": initialize_params["initializationOptions"]["settings"]})  # type: ignore
+            self.server.notify.workspace_did_change_configuration({"settings": initialize_params["initializationOptions"]["settings"]})  # type: ignore
 
-        if not self._service_ready_event.is_set():
-            log.info("Waiting for service to be ready ...")
-            self._service_ready_event.wait()
-        log.info("Service is ready")
+            if not self._service_ready_event.is_set():
+                log.info("Waiting for service to be ready ...")
+                self._service_ready_event.wait()
+            log.info("Service is ready")
 
-        if not self._project_ready_event.is_set():
-            log.info("Waiting for project to be ready ...")
-            project_ready_timeout = 20  # Hotfix: Using timeout until we figure out why sometimes we don't get the project ready event
-            if self._project_ready_event.wait(timeout=project_ready_timeout):
-                log.info("Project is ready")
+            if not self._project_ready_event.is_set():
+                log.info("Waiting for project to be ready ...")
+                project_ready_timeout = 20  # Hotfix: Using timeout until we figure out why sometimes we don't get the project ready event
+                if self._project_ready_event.wait(timeout=project_ready_timeout):
+                    log.info("Project is ready")
+                else:
+                    log.warning("Did not receive project ready status within %d seconds; proceeding anyway", project_ready_timeout)
             else:
-                log.warning("Did not receive project ready status within %d seconds; proceeding anyway", project_ready_timeout)
-        else:
-            log.info("Project is ready")
+                log.info("Project is ready")
 
-        log.info("Startup complete")
+            log.info("Startup complete")
+
+        # discard state that a previously terminated process could not fold into the saved workspace,
+        # since replaying it against the current file system can abort Eclipse's startup entirely...
+        workspace = self._jdtls_workspace
+        workspace.discard_unsaved_state()
+
+        try:
+            attempt_startup()
+        except Exception as first_failure:
+            # a startup failure is most commonly caused by unusable Eclipse state in the workspace, which
+            # no amount of retrying resolves; discarding the state costs a re-import but restores service...
+            log.warning("EclipseJDTLS startup failed (%s); resetting the workspace and retrying once", first_failure)
+            self.server.stop(timeout=5.0)
+            workspace.reset(self.runtime_dependency_paths.jdtls_readonly_config_path)
+            self._service_ready_event.clear()
+            self._project_ready_event.clear()
+            self._recreate_language_server_interface()
+            try:
+                attempt_startup()
+            except Exception as second_failure:
+                raise SolidLSPException(
+                    f"EclipseJDTLS failed to start even with a freshly reset workspace at {workspace.data_dir}"
+                ) from second_failure
 
     @override
     def _request_hover(self, file_buffer: LSPFileBuffer, line: int, column: int) -> ls_types.Hover | None:

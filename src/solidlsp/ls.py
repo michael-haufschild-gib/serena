@@ -574,6 +574,7 @@ class SolidLanguageServer(ABC):
         # create the low-level server interface, potentially installing dependencies and launching a subprocess
         self._process_launch_info: ProcessLaunchInfo | None = process_launch_info
         self._dependency_provider: LanguageServerDependencyProvider | None = None
+        self._interface_logging_fn = logging_fn
         self.server = self._create_language_server_interface(logging_fn)
         """
         the low-level language server interface
@@ -626,6 +627,18 @@ class SolidLanguageServer(ABC):
         if self._process_launch_info is None:
             self._process_launch_info = self._create_process_launch_info()
         return self._process_launch_info
+
+    def _recreate_language_server_interface(self) -> None:
+        """
+        Replaces the low-level server interface with a fresh, unstarted one, discarding the
+        previously computed process launch information so that it is recomputed.
+
+        This allows a subclass to retry a failed startup after repairing the cause of the failure;
+        the already resolved dependency provider is retained, so no dependencies are re-installed.
+        """
+        self._process_launch_info = None
+        self.server = self._create_language_server_interface(self._interface_logging_fn)
+        self.server.on_any_notification(self._observe_server_notification)
 
     def _create_language_server_interface(self, logging_fn: Callable[[str, str, StringDict | str], None] | None) -> LanguageServerInterface:
         """
