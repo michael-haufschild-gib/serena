@@ -14,6 +14,16 @@ T = TypeVar("T")
 
 
 class TaskExecutor:
+    """
+    Executes tasks one after another, in the order they were issued.
+    """
+
+    GRACE_PERIOD_AFTER_TIMEOUT = 30.0
+    """
+    seconds for which the next task is held back after a task timed out, waiting for the timed-out task's thread to
+    actually finish; this keeps two tasks from running at the same time, unless a task hangs for longer than this
+    """
+
     def __init__(self, name: str):
         """
         :param name: the name of the task executor, used for logging purposes
@@ -38,6 +48,8 @@ class TaskExecutor:
             self.logged = logged
             self.timeout = timeout
             self._function = function
+            self._started = threading.Event()
+            self._thread: Thread | None = None
 
         def _tostring_includes(self) -> list[str]:
             return ["name"]
@@ -48,6 +60,7 @@ class TaskExecutor:
             """
 
             def run_task() -> None:
+                self._started.set()
                 try:
                     if self.future.done():
                         if self.logged:
@@ -62,8 +75,8 @@ class TaskExecutor:
                         log.error(f"Error during execution of {self.name}: {e}", exc_info=e)
                         self.future.set_exception(e)
 
-            thread = Thread(target=run_task, name=self.name)
-            thread.start()
+            self._thread = Thread(target=run_task, name=self.name)
+            self._thread.start()
 
         def is_done(self) -> bool:
             """
@@ -78,7 +91,8 @@ class TaskExecutor:
             If the timeout is reached, a TimeoutError is raised.
             If the task is cancelled, a CancelledError is raised.
 
-            :param timeout: the maximum time to wait in seconds; if None, wait indefinitely
+            :param timeout: the maximum execution time in seconds, counted from the start of the task's execution
+                (not including the time it waits for earlier tasks); if None, wait indefinitely
             :param cancel_on_timeout: whether to cancel the task if the timeout is reached.
                 If the task has not yet started, cancellation prevents its execution entirely;
                 if it is already running, the underlying thread continues to run, but its result
@@ -86,6 +100,9 @@ class TaskExecutor:
             :return: the result of the task
             """
             try:
+                if timeout is not None:
+                    while not self._started.wait(0.1) and not self.future.done():
+                        pass
                 return self.future.result(timeout=timeout)
             except concurrent.futures.TimeoutError:
                 if cancel_on_timeout:
@@ -100,20 +117,20 @@ class TaskExecutor:
             """
             self.future.cancel()
 
-        def wait_until_done(self) -> bool:
+        def wait_until_finished(self, grace_period: float) -> bool:
             """
-            Waits until the task is done or its timeout is reached.
-            The task is done if it either completed successfully, failed with an exception, or was cancelled.
+            Waits until the task's execution has finished, i.e. until its thread has terminated, but no longer than
+            the task's timeout plus the given grace period.
+            A task that timed out (or was cancelled) while running is thus still waited for, so that the next task
+            does not run concurrently with it.
 
-            :return: True if the task is done (successfully, with failure, or via cancellation), False if the timeout was reached
+            :param grace_period: the time, in seconds, to wait beyond the task's timeout
+            :return: True if the execution has finished, False if the task is still running
             """
-            try:
-                self.future.result(timeout=self.timeout)
-            except concurrent.futures.TimeoutError:
-                return False
-            except:
-                pass
-            return True
+            if self._thread is None:
+                return True
+            self._thread.join(timeout=None if self.timeout is None else self.timeout + grace_period)
+            return not self._thread.is_alive()
 
     def _process_task_queue(self) -> None:
         while True:
@@ -134,9 +151,13 @@ class TaskExecutor:
             task.start()
 
             # wait for task completion
-            is_done = task.wait_until_done()
-            if not is_done:
-                log.warning("Task %s did not complete within the timeout of %s seconds; continuing ...", task.name, task.timeout)
+            if not task.wait_until_finished(self.GRACE_PERIOD_AFTER_TIMEOUT):
+                log.error(
+                    "Task %s is still running %s seconds after its timeout of %s seconds; continuing with the next task",
+                    task.name,
+                    self.GRACE_PERIOD_AFTER_TIMEOUT,
+                    task.timeout,
+                )
             with self._task_executor_lock:
                 self._task_executor_current_task = None
 

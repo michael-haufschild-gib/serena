@@ -151,9 +151,16 @@ for g in $groups; do kill -KILL -"$g" 2>/dev/null; done
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._watcher: subprocess.Popen[bytes] | None = None
+        self._registered_groups: set[int] = set()
 
-    def _send(self, line: str) -> None:
-        with self._lock:
+    def _sync(self, line: str) -> None:
+        """
+        Sends a line to the watcher, (re)starting the watcher if necessary; a newly started watcher is first sent
+        all groups that are registered, so that a watcher that died (e.g. killed by someone) loses no registrations.
+        Must be called with the lock held.
+        """
+        for attempt in range(2):
+            lines = [line]
             if self._watcher is None or self._watcher.poll() is not None:
                 self._watcher = subprocess.Popen(
                     ["/bin/sh", "-c", self._WATCHER_SCRIPT],
@@ -162,24 +169,33 @@ for g in $groups; do kill -KILL -"$g" 2>/dev/null; done
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,  # immune to signals sent to our own process group
                 )
+                lines = [f"+{group}" for group in sorted(self._registered_groups)]
             assert self._watcher.stdin is not None
             try:
-                self._watcher.stdin.write(f"{line}\n".encode())
+                self._watcher.stdin.write("".join(f"{x}\n" for x in lines).encode())
                 self._watcher.stdin.flush()
+                return
             except OSError as e:
-                log.warning(f"Could not notify the process group watcher ({line}): {e}")
+                # the watcher died since we checked; retry once with a new one
+                log.warning(f"Could not notify the process group watcher (attempt {attempt + 1}): {e}")
+                self._watcher.kill()
+                self._watcher.wait()
 
     def register(self, process_group_id: int) -> None:
         """
         :param process_group_id: the group to kill should this process die without terminating it first
         """
-        self._send(f"+{process_group_id}")
+        with self._lock:
+            self._registered_groups.add(process_group_id)
+            self._sync(f"+{process_group_id}")
 
     def unregister(self, process_group_id: int) -> None:
         """
         :param process_group_id: a group previously registered via :meth:`register` that has been terminated
         """
-        self._send(f"-{process_group_id}")
+        with self._lock:
+            self._registered_groups.discard(process_group_id)
+            self._sync(f"-{process_group_id}")
 
 
 class ManagedSubprocessLauncher:

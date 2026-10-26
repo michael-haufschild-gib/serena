@@ -27,7 +27,8 @@ class ProcessLifecycle:
 
     def __init__(self) -> None:
         self._shutdown_actions: list[Callable[[], None]] = []
-        self._shutdown_lock = threading.Lock()
+        # reentrant, as a signal handler may run shutdown() on a thread that is already inside it
+        self._shutdown_lock = threading.RLock()
         self._shutting_down = False
 
     def add_shutdown_action(self, action: Callable[[], None]) -> None:

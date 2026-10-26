@@ -68,7 +68,15 @@ class SharedServerAddress:
         run_dir = Path(tempfile.gettempdir()) / "serena-shared-servers"
         run_dir.mkdir(mode=0o700, exist_ok=True)
         self.socket_path = str(run_dir / f"{digest}.sock")
-        self.lock_path = str(run_dir / f"{digest}.lock")
+        self.lock_path = self.lock_path_for(self.socket_path)
+
+    @staticmethod
+    def lock_path_for(socket_path: str) -> str:
+        """
+        :param socket_path: the socket path of a shared server
+        :return: the path of the lock under which launchers connect to (or start) that server
+        """
+        return os.path.splitext(socket_path)[0] + ".lock"
 
     def try_connect(self) -> socket.socket | None:
         """
@@ -117,7 +125,8 @@ class SharedServerLauncher:
             if os.path.exists(self._address.socket_path):
                 os.unlink(self._address.socket_path)  # stale socket of a server that is gone
             server = subprocess.Popen(
-                [sys.executable, "-m", "serena.project_daemon", self._address.project_root, self._address.socket_path],
+                # -P: never import modules from the project directory (the server's working directory)
+                [sys.executable, "-P", "-m", "serena.project_daemon", self._address.project_root, self._address.socket_path],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

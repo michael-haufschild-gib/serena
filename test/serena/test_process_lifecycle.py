@@ -232,3 +232,12 @@ def test_the_shared_server_exits_once_it_has_no_sessions(serena_env: tuple[dict[
 
     assert server.is_running(), "the shared server must outlive a session"
     assert not _wait_until_gone([server, *language_server_processes], timeout=30), "the idle shared server did not exit"
+
+
+def test_project_files_named_like_stdlib_modules_do_not_break_the_shared_server(serena_env: tuple[dict[str, str], Path]) -> None:
+    env, project_root = serena_env
+    for module in ("json", "socket", "subprocess"):
+        (project_root / f"{module}.py").write_text("raise ImportError('the project module was imported instead of the stdlib one')\n")
+
+    proc = _start_session(env, project_root, shared_server=True)
+    proc.kill()

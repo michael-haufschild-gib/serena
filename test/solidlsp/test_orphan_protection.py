@@ -162,3 +162,102 @@ def test_language_server_process_dies_with_a_sigkilled_serena() -> None:
             proc.kill()
         if driver.poll() is None:
             driver.kill()
+
+
+def test_stopping_a_crashed_language_server_kills_the_processes_it_left_behind() -> None:
+    """
+    A language server whose main process died (e.g. typescript-language-server) may leave processes it started
+    (e.g. tsserver) behind in its process group; stopping it must still terminate them.
+    """
+    from solidlsp.ls_config import LanguageServerId
+    from solidlsp.ls_process import StdioLanguageServer
+    from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
+
+    marker = f"crashed-ls-test-{uuid.uuid4().hex}"
+    ls = StdioLanguageServer(
+        process_launch_info=ProcessLaunchInfo(
+            cmd=[
+                sys.executable,
+                "-c",
+                "import subprocess, sys; "
+                f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)  # {marker}'], "
+                "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+            ],
+            cwd="/tmp",
+        ),
+        ls_id=LanguageServerId.PYTHON,
+        determine_log_level=lambda _line: 0,
+    )
+    try:
+        ls.start()
+        deadline = time.monotonic() + 10
+        while (ls.is_running() or not _find_marked_processes(marker)) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not ls.is_running(), "the language server's main process should have exited"
+        leftovers = _find_marked_processes(marker)
+        assert leftovers, "the process started by the language server should still be running"
+
+        ls.stop()
+
+        _, alive = psutil.wait_procs(leftovers, timeout=5)
+        assert not [p for p in alive if p.status() != psutil.STATUS_ZOMBIE], "processes of the crashed language server survived"
+    finally:
+        for proc in _find_marked_processes(marker):
+            proc.kill()
+
+
+_RESTARTED_WATCHER_DRIVER_SRC = textwrap.dedent(
+    """
+    import sys
+    import time
+    import psutil
+    from solidlsp.ls_config import LanguageServerId
+    from solidlsp.ls_process import StdioLanguageServer
+    from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
+
+    marker = sys.argv[1]
+
+    def start(suffix):
+        ls = StdioLanguageServer(
+            process_launch_info=ProcessLaunchInfo(
+                cmd=[sys.executable, "-c", f"import time; time.sleep(300)  # {marker}-{suffix}"], cwd="/tmp"
+            ),
+            ls_id=LanguageServerId.PYTHON,
+            determine_log_level=lambda _line: 0,
+        )
+        ls.start()
+        return ls
+
+    first = start("first")
+    # kill the watcher, as a user cleaning up processes might
+    for child in psutil.Process().children():
+        if "groups=" in " ".join(child.cmdline()):
+            child.kill()
+            child.wait()
+    second = start("second")
+    print("READY", flush=True)
+    time.sleep(600)
+    """
+)
+
+
+def test_a_restarted_watcher_still_protects_earlier_language_servers() -> None:
+    marker = f"orphan-watcher-test-{uuid.uuid4().hex}"
+    driver = subprocess.Popen(
+        [sys.executable, "-c", _RESTARTED_WATCHER_DRIVER_SRC, marker], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        assert driver.stdout.readline().strip() == "READY", driver.stderr.read()
+        started = [p for p in _find_marked_processes(marker) if p.pid != driver.pid]
+        assert len(started) == 2
+
+        driver.kill()
+        driver.wait(timeout=5)
+
+        _, alive = psutil.wait_procs(started, timeout=10)
+        assert not [p for p in alive if p.status() != psutil.STATUS_ZOMBIE], "a language server survived"
+    finally:
+        for proc in _find_marked_processes(marker):
+            proc.kill()
+        if driver.poll() is None:
+            driver.kill()

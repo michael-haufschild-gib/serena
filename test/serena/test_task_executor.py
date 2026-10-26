@@ -57,25 +57,17 @@ def test_task_executor_exception(executor):
 
 def test_task_executor_cancel_current(executor):
     """
-    Tests that tasks that are cancelled are handled correctly, i.e. that
-      * subsequent tasks are executed as soon as cancellation ensues.
-      * the cancelled task raises CancelledError when result() is called.
+    Tests that a task that is cancelled while running raises CancelledError when result() is called, and that
+    subsequent tasks are still executed (once the cancelled task's execution has ended).
     """
-    start_time = time.time()
-    future1 = executor.issue_task(Task(10).run, name="task1")
-    future2 = executor.issue_task(Task(1).run, name="task2")
-    time.sleep(1)
+    future1 = executor.issue_task(Task(2).run, name="task1")
+    future2 = executor.issue_task(Task(0.1).run, name="task2")
+    time.sleep(0.5)
     future1.cancel()
     assert future2.result() is True
-    end_time = time.time()
-    assert (end_time - start_time) < 9, "Cancelled task did not stop in time"
-    have_cancelled_error = False
-    try:
+    with pytest.raises(Exception) as exc_info:
         future1.result()
-    except Exception as e:
-        assert e.__class__.__name__ == "CancelledError"
-        have_cancelled_error = True
-    assert have_cancelled_error
+    assert exc_info.value.__class__.__name__ == "CancelledError"
 
 
 def test_task_executor_cancel_future(executor):
@@ -95,3 +87,33 @@ def test_task_executor_cancel_future(executor):
         pass
     assert task1.did_run
     assert not task2.did_run
+
+
+def test_timeout_counts_from_the_start_of_execution(executor):
+    """
+    A task that waits behind a long-running task must get its full timeout once it runs (with a shared executor,
+    the long-running task may belong to another session).
+    """
+    executor.issue_task(Task(1.0).run, name="long")
+    quick = executor.issue_task(Task(0.1).run, name="quick", timeout=0.5)
+
+    assert quick.result(timeout=0.5) is True
+
+
+def test_a_timed_out_task_finishes_before_the_next_task_starts(executor):
+    events: list[tuple[str, float]] = []
+
+    def slow() -> None:
+        time.sleep(0.6)
+        events.append(("slow finished", time.monotonic()))
+
+    def next_task() -> None:
+        events.append(("next started", time.monotonic()))
+
+    timed_out = executor.issue_task(slow, name="slow", timeout=0.1)
+    following = executor.issue_task(next_task, name="next")
+    with pytest.raises(TimeoutError):
+        timed_out.result(timeout=0.1)
+    following.result()
+
+    assert [name for name, _ in events] == ["slow finished", "next started"]

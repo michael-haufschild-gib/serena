@@ -90,3 +90,17 @@ class TestPersistentSymbolCache:
         cache.put("a.py", "h1", [1])
 
         assert cache.get("a.py") == ("h1", [1])
+
+    def test_an_older_version_writing_concurrently_never_serves_its_entries_to_a_newer_one(self, tmp_path: Path) -> None:
+        """
+        After an upgrade, an old and a new server may work on the same project (and cache) for a while.
+        """
+        db_path = tmp_path / "symbols.sqlite"
+        old: PersistentSymbolCache[dict] = PersistentSymbolCache(db_path, 3)
+        new: PersistentSymbolCache[dict] = PersistentSymbolCache(db_path, 4)
+
+        old.put("a.py", "h1", {"format": "v3"})
+
+        assert PersistentSymbolCache(db_path, 4).get("a.py") is None
+        assert new.get("a.py") is None
+        assert old.get("a.py") == ("h1", {"format": "v3"})

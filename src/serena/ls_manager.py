@@ -226,9 +226,8 @@ class LanguageServerManager:
         """
         Stops the given language server for good, closing its (persistent) symbol caches.
         """
-        if ls.is_running():
-            log.info(f"Stopping language server for language {ls.ls_id} ...")
-            ls.stop(shutdown_timeout=timeout)
+        log.info(f"Stopping language server for language {ls.ls_id} ...")
+        ls.stop(shutdown_timeout=timeout)  # also cleans up after a language server that terminated on its own
         ls.close_caches()
 
     def iter_language_servers(self) -> Iterator[SolidLanguageServer]:

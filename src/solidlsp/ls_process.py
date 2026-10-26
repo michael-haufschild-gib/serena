@@ -227,6 +227,7 @@ class LanguageServerInterface(ABC):
         """
         if not self.is_running():
             log.debug("Server process not running, skipping shutdown.")
+            self._release_terminated_server()
             return
 
         self._is_stopping = True
@@ -237,6 +238,11 @@ class LanguageServerInterface(ABC):
     @abstractmethod
     def _stop(self, timeout: float) -> None:
         pass
+
+    def _release_terminated_server(self) -> None:
+        """
+        Releases the resources held for a language server that has terminated on its own (e.g. crashed).
+        """
 
     def _send_shutdown(self) -> None:
         """
@@ -536,6 +542,13 @@ class StdioLanguageServer(LanguageServerInterface):
             name=f"LSP-stderr-reader:{self.ls_id.value}",
             daemon=True,
         ).start()
+
+    def _release_terminated_server(self) -> None:
+        # processes the server started may still be alive in its process group (e.g. tsserver after
+        # typescript-language-server crashed), so the group is terminated regardless
+        if self._process is not None:
+            self._process.terminate(timeout=0)
+            self._process = None
 
     def _stop(self, timeout: float) -> None:
         if self._process is None:

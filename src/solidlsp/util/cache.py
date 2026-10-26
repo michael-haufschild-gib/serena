@@ -24,12 +24,15 @@ class PersistentSymbolCache(Generic[TValue]):
         cache and never overwrite each other's entries, and
       * nothing is lost if the process is killed.
 
-    The cache is scoped to a version: opening it with a different version discards all entries.
+    The cache is scoped to a version: each entry is stored with the version it was written for and is only ever
+    returned to readers of that version, so processes running different versions of the code can share the
+    database file safely; opening the cache discards the entries of all other versions.
     If the database cannot be used (e.g. it is corrupt or locked for too long), the cache degrades
     to its in-memory part instead of failing the caller.
     """
 
     _BUSY_TIMEOUT_MS = 5000
+    _SCHEMA_VERSION = 2
 
     def __init__(self, db_path: Path, version: Hashable, max_entries_in_memory: int = 128) -> None:
         """
@@ -41,9 +44,10 @@ class PersistentSymbolCache(Generic[TValue]):
         self._max_entries_in_memory = max_entries_in_memory
         self._memory: OrderedDict[str, tuple[str, TValue]] = OrderedDict()
         self._lock = threading.Lock()
+        self._version = repr(version)
         self._connection: sqlite3.Connection | None = None
         try:
-            self._connection = self._open(db_path, repr(version))
+            self._connection = self._open(db_path, self._version)
         except sqlite3.Error as e:
             log.warning("Symbol cache %s is unusable (%s); continuing with an in-memory cache only", db_path, e)
 
@@ -53,17 +57,23 @@ class PersistentSymbolCache(Generic[TValue]):
         connection = sqlite3.connect(db_path, timeout=cls._BUSY_TIMEOUT_MS / 1000, check_same_thread=False, isolation_level=None)
         try:
             connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS entries (path TEXT PRIMARY KEY, content_hash TEXT NOT NULL, payload BLOB NOT NULL)"
-            )
-            with connection:
-                row = connection.execute("SELECT value FROM meta WHERE name = 'version'").fetchone()
-                if row is None or row[0] != version:
-                    if row is not None:
-                        log.info("Symbol cache %s is outdated (version %s, expected %s); discarding it", db_path, row[0], version)
-                    connection.execute("DELETE FROM entries")
-                    connection.execute("INSERT OR REPLACE INTO meta (name, value) VALUES ('version', ?)", (version,))
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                if connection.execute("PRAGMA user_version").fetchone()[0] != cls._SCHEMA_VERSION:
+                    connection.execute("DROP TABLE IF EXISTS entries")
+                    connection.execute("DROP TABLE IF EXISTS meta")
+                    connection.execute(
+                        "CREATE TABLE entries (version TEXT NOT NULL, path TEXT NOT NULL, content_hash TEXT NOT NULL, "
+                        "payload BLOB NOT NULL, PRIMARY KEY (version, path))"
+                    )
+                    connection.execute(f"PRAGMA user_version = {cls._SCHEMA_VERSION}")
+                deleted = connection.execute("DELETE FROM entries WHERE version != ?", (version,)).rowcount
+                if deleted:
+                    log.info("Discarded %d entries of other versions from symbol cache %s", deleted, db_path)
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
         except BaseException:
             connection.close()
             raise
@@ -94,7 +104,9 @@ class PersistentSymbolCache(Generic[TValue]):
             if self._connection is None:
                 return None
             try:
-                row = self._connection.execute("SELECT content_hash, payload FROM entries WHERE path = ?", (path,)).fetchone()
+                row = self._connection.execute(
+                    "SELECT content_hash, payload FROM entries WHERE version = ? AND path = ?", (self._version, path)
+                ).fetchone()
             except sqlite3.Error as e:
                 self._disable_persistence(e)
                 return None
@@ -127,7 +139,8 @@ class PersistentSymbolCache(Generic[TValue]):
                 return
             try:
                 self._connection.execute(
-                    "INSERT OR REPLACE INTO entries (path, content_hash, payload) VALUES (?, ?, ?)", (path, content_hash, payload)
+                    "INSERT OR REPLACE INTO entries (version, path, content_hash, payload) VALUES (?, ?, ?, ?)",
+                    (self._version, path, content_hash, payload),
                 )
             except sqlite3.Error as e:
                 self._disable_persistence(e)

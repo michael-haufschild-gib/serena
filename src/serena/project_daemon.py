@@ -6,9 +6,11 @@ Started by the first launcher for the project as ``python -m serena.project_daem
 it runs detached and exits once it has not had a session for ``ls_idle_timeout`` seconds.
 """
 
+import fcntl
 import io
 import logging
 import os
+import select
 import socket
 import sys
 import threading
@@ -22,7 +24,7 @@ from serena.config.serena_config import ModeSelectionDefinitionWithAddedModes, S
 from serena.constants import SERENA_LOG_FORMAT
 from serena.mcp import SerenaMCPFactory
 from serena.project import Project
-from serena.shared_server import SharedServerRequest
+from serena.shared_server import SharedServerAddress, SharedServerRequest
 from serena.task_executor import TaskExecutor
 from serena.util.process_lifecycle import ProcessLifecycle
 
@@ -74,23 +76,43 @@ class SharedProjectServer:
         listener.listen()
         log.info(f"Serving project {self._project.project_root} at {self._socket_path}")
 
-        if self._idle_timeout is not None:
-            threading.Thread(target=self._exit_when_idle, name="IdleExit", daemon=True).start()
-
+        # accepting connections and deciding to exit when idle happen in this one loop, so they cannot race
+        listener.settimeout(
+            self._IDLE_CHECK_INTERVAL if self._idle_timeout is None else min(self._IDLE_CHECK_INTERVAL, self._idle_timeout / 2)
+        )
         while True:
-            connection, _ = listener.accept()
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                if self._is_idle() and self._exit_if_still_idle(listener):
+                    return
+                continue
+            connection.settimeout(None)
             with self._sessions_lock:
                 self._num_sessions += 1
             threading.Thread(target=self._serve_session, args=(connection,), name="Session", daemon=True).start()
 
-    def _exit_when_idle(self) -> None:
-        assert self._idle_timeout is not None
-        while True:
-            time.sleep(min(self._IDLE_CHECK_INTERVAL, self._idle_timeout / 2))
-            with self._sessions_lock:
-                idle = self._num_sessions == 0 and time.monotonic() - self._last_session_end >= self._idle_timeout
-            if idle:
-                self._lifecycle.shutdown(f"no session for {self._idle_timeout:.0f}s")
+    def _is_idle(self) -> bool:
+        if self._idle_timeout is None:
+            return False
+        with self._sessions_lock:
+            return self._num_sessions == 0 and time.monotonic() - self._last_session_end >= self._idle_timeout
+
+    def _exit_if_still_idle(self, listener: socket.socket) -> bool:
+        """
+        Exits unless a launcher connected in the meantime. Launchers connect only while holding the lock file, so
+        holding it here means that every connection made so far is already waiting to be accepted.
+
+        :return: False if the server must keep running (it exits otherwise)
+        """
+        with open(SharedServerAddress.lock_path_for(self._socket_path), "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            if select.select([listener], [], [], 0)[0]:
+                return False  # a connection is waiting
+            listener.close()
+            # the socket is removed and the process exits while the lock is held, so the next launcher starts a new server
+            self._lifecycle.shutdown(f"no session for {self._idle_timeout:.0f}s")
+        return True
 
     def _serve_session(self, connection: socket.socket) -> None:
         try:

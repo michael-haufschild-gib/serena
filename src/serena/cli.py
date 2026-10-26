@@ -375,7 +375,8 @@ class TopLevelCommands(AutoRegisteringGroup):
             if project_root is not None:
                 request = SharedServerRequest(
                     project_root=project_root,
-                    context=context,
+                    # a context file path must not be resolved relative to the shared server's working directory
+                    context=os.path.abspath(context) if os.path.isfile(context) else context,
                     modes=list(default_modes),
                     added_modes=list(added_modes),
                     log_level=log_level,
@@ -384,7 +385,8 @@ class TopLevelCommands(AutoRegisteringGroup):
                 )
                 log.info("Handing the session over to the shared server of %s", project_root)
                 logging.shutdown()
-                os.execv(sys.executable, [sys.executable, "-m", "serena.shared_server", request.to_json()])
+                # -P: never import modules from the working directory (e.g. a project file named like a stdlib module)
+                os.execv(sys.executable, [sys.executable, "-P", "-m", "serena.shared_server", request.to_json()])
 
         mode_selection_def: ModeSelectionDefinition | None = None
         if default_modes or added_modes:
