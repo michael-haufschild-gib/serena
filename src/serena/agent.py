@@ -16,7 +16,6 @@ from typing import TypeVar
 import requests
 from sensai.util import logging
 from sensai.util.helper import mark_used
-from sensai.util.logging import LogTime
 from sensai.util.string import dict_string
 
 from interprompt.jinja_template import JinjaTemplate
@@ -830,12 +829,9 @@ class SerenaAgent:
         if update_active_tools:
             self._update_active_tools()
 
-        def init_language_servers() -> None:
-            with LogTime("Language server initialization", logger=log):
-                self.reset_language_server_manager()
-
-        # initialise the project's language servers in the background
-        self.issue_task(init_language_servers)
+        # create the project's language server manager in the background (it may have to wait for the project
+        # configuration to be generated); the language servers themselves are only started on first use
+        self.issue_task(self.reset_language_server_manager, name="CreateLanguageServerManager")
 
         if self._project_activation_callback is not None:
             self._project_activation_callback()

@@ -467,7 +467,8 @@ class Project(ToStringMixin):
 
     def create_language_server_manager(self) -> LanguageServerManager:
         """
-        Creates the language server manager for the project, starting one language server per configured programming language.
+        Creates the language server manager for the project, which starts the language servers of the configured
+        languages on first use.
 
         :return: the language server manager, which is also stored in the project instance
         """
@@ -512,11 +513,25 @@ class Project(ToStringMixin):
                 ls_specific_settings=ls_specific_settings,
                 trace_lsp_communication=self.serena_config.trace_lsp_communication,
             )
-            self.language_server_manager = LanguageServerManager.from_languages(self.project_config.language_servers, factory, self)
+            self.language_server_manager = LanguageServerManager(
+                self.project_config.language_servers, factory, self, idle_timeout=self._determine_ls_idle_timeout()
+            )
             return self.language_server_manager
         except Exception as e:
             self._language_server_manager_init_error = e
             raise
+
+    def _determine_ls_idle_timeout(self) -> float | None:
+        """
+        :return: the time after which unused language servers are stopped, or None if they shall never be stopped
+        """
+        idle_timeout = self.serena_config.ls_idle_timeout
+        if idle_timeout <= 0:
+            return None
+        tool_timeout = self.serena_config.tool_timeout
+        if tool_timeout is not None and tool_timeout > 0:
+            idle_timeout = max(idle_timeout, 2 * tool_timeout)
+        return idle_timeout
 
     def get_language_server_manager_status(self) -> str:
         """

@@ -52,6 +52,10 @@ ignored_memory_patterns: []
 # timeout, in seconds, after which tool executions are terminated
 tool_timeout: 240
 
+# time, in seconds, after which an unused language server is stopped; it is restarted on its next use.
+# Values of 0 or less keep language servers running until Serena exits.
+ls_idle_timeout: 600
+
 # list of tools to be globally excluded
 excluded_tools: []
 

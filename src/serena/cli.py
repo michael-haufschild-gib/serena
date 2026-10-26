@@ -312,6 +312,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         tool_timeout: float | None,
     ) -> None:
         from serena.mcp import SerenaMCPFactory
+        from serena.util.process_lifecycle import ProcessLifecycle
 
         # initialize logging, using INFO level initially (will later be adjusted by SerenaAgent according to the config)
         #   * stream handler for stderr (for direct console output, which will also be captured by clients like Claude Desktop)
@@ -365,8 +366,13 @@ class TopLevelCommands(AutoRegisteringGroup):
                 "Positional project arg is deprecated; use --project instead. Used: %s",
                 project_file,
             )
+        lifecycle = ProcessLifecycle()
+        if factory.agent is not None:
+            lifecycle.add_shutdown_action(factory.agent.on_shutdown)
+        lifecycle.install()
         log.info("Starting MCP server …")
         server.run(transport="stdio")
+        lifecycle.shutdown("the MCP client closed the connection")
 
     @staticmethod
     @click.command(

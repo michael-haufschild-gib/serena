@@ -798,6 +798,12 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     """
     timeout for tool calls in seconds; if a tool takes longer than this, it is aborted and an error is returned.
     """
+    ls_idle_timeout: float = 600.0
+    """
+    time in seconds after which a language server that has not been used is stopped (it is restarted on its next use);
+    values of 0 or less disable stopping idle language servers. Values below twice the tool timeout are raised to that,
+    so that no language server is stopped while a tool call may still be using it.
+    """
 
     default_max_tool_answer_chars: int = 150_000
     """Used as default for tools where the apply method has a default maximal answer length.
