@@ -2,7 +2,6 @@ import logging
 import os
 import shutil
 import tempfile
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -64,22 +63,6 @@ class TestProjectConfigAutogenerate:
         assert config.project_name == self.project_path.name
         assert config.language_servers == [LanguageServerId.PYTHON]
 
-    def test_autogenerate_with_python_files_and_custom_ls_priorities(self):
-        """Test successful autogeneration with Python source files, using custom language server priorities."""
-        # Create a Python file
-        python_file = self.project_path / "main.py"
-        python_file.write_text("def hello():\n    print('Hello, world!')\n")
-
-        serena_config = deepcopy(self.serena_config)
-        serena_config.ls_priorities = {LanguageServerId.PYTHON_TY.value: 3}
-
-        # Run autogenerate
-        config = ProjectConfig.autogenerate(self.project_path, serena_config, save_to_disk=False)
-
-        # Verify the configuration
-        assert config.project_name == self.project_path.name
-        assert config.language_servers == [LanguageServerId.PYTHON_TY]
-
     def test_autogenerate_with_js_files(self):
         """Test successful autogeneration with JavaScript source files."""
         # Create files for multiple languages
@@ -104,9 +87,9 @@ class TestProjectConfigAutogenerate:
 
     def test_autogenerate_saves_to_disk(self):
         """Test that autogenerate can save the configuration to disk."""
-        # Create a Go file
-        go_file = self.project_path / "main.go"
-        go_file.write_text("package main\n\nfunc main() {}\n")
+        # Create a Rust file
+        rust_file = self.project_path / "main.rs"
+        rust_file.write_text("fn main() {}\n")
 
         # Run autogenerate with save_to_disk=True
         config = ProjectConfig.autogenerate(self.project_path, self.serena_config, save_to_disk=True)
@@ -116,7 +99,7 @@ class TestProjectConfigAutogenerate:
         assert config_path.exists()
 
         # Verify the content
-        assert config.language_servers == [LanguageServerId.GO]
+        assert config.language_servers == [LanguageServerId.RUST]
 
     def test_autogenerate_nonexistent_path(self):
         """Test that autogenerate raises FileNotFoundError for non-existent path."""

@@ -44,10 +44,10 @@ def test_available_languages_include_experimental_when_no_active_project():
 
 
 def test_available_languages_exclude_project_languages():
-    dashboard = _make_dashboard(project_languages=[LanguageServerId.PYTHON, LanguageServerId.MARKDOWN])
+    dashboard = _make_dashboard(project_languages=[LanguageServerId.PYTHON, LanguageServerId.YAML])
     response = dashboard._get_available_languages()
     available = set(response.languages)
     assert LanguageServerId.PYTHON.value not in available
-    assert LanguageServerId.MARKDOWN.value not in available
+    assert LanguageServerId.YAML.value not in available
     # ensure experimental languages remain available for selection
-    assert LanguageServerId.ANSIBLE.value in available
+    assert LanguageServerId.TOML.value in available

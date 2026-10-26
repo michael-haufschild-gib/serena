@@ -27,13 +27,13 @@ class TestComputeLanguageServerSupportComposition:
         assert composition[LanguageServerId.PYTHON] == 100.0
 
     def test_mixed_language_percentages_relative_to_recognised_files(self, tmp_path: Path) -> None:
-        _touch(tmp_path, "a.py", "b.py", "c.py", "d.go")
+        _touch(tmp_path, "a.py", "b.py", "c.py", "d.rs")
         _touch(tmp_path, *[f"asset_{i}.dat" for i in range(50)])
 
         composition = compute_language_server_support_composition(str(tmp_path))
 
         assert composition[LanguageServerId.PYTHON] == 75.0
-        assert composition[LanguageServerId.GO] == 25.0
+        assert composition[LanguageServerId.RUST] == 25.0
 
     def test_repo_without_recognised_files(self, tmp_path: Path) -> None:
         _touch(tmp_path, "readme.txt", "logo.png")

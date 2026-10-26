@@ -1,9 +1,5 @@
 """
-Basic tests for C/C++ language server integration (clangd and ccls).
-
-This module tests both Language.CPP (clangd) and Language.CPP_CCLS (ccls)
-using the same test repository. Tests are skipped if the respective language
-server is not available.
+Basic tests for C/C++ language server integration (clangd).
 """
 
 import os
@@ -16,21 +12,18 @@ import pytest
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_utils import SymbolUtils
-from test.conftest import get_repo_path, language_server_tests_enabled, start_ls_context
+from test.conftest import get_repo_path, start_ls_context
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 _cpp_servers: list[LanguageServerId] = [LanguageServerId.CPP]
-if language_server_tests_enabled(LanguageServerId.CPP_CCLS):
-    _cpp_servers.append(LanguageServerId.CPP_CCLS)
 
 
-@pytest.mark.parametrize("language", [LanguageServerId.CPP, LanguageServerId.CPP_CCLS])
-def test_source_fn_matcher_includes_ino(language: LanguageServerId) -> None:
+def test_source_fn_matcher_includes_ino() -> None:
     """Arduino .ino sketches are C++ and must route to the C++ language server.
 
     This is a pure matcher check; it needs no running language server.
     """
-    matcher = language.get_source_fn_matcher()
+    matcher = LanguageServerId.CPP.get_source_fn_matcher()
     assert matcher.is_relevant_filename("sketch.ino")
     assert matcher.is_relevant_filename("BLINK.INO")  # case-insensitive
     assert matcher.is_relevant_filename("/path/to/s3_camera.ino")
@@ -39,9 +32,9 @@ def test_source_fn_matcher_includes_ino(language: LanguageServerId) -> None:
 
 
 @pytest.mark.cpp
-@pytest.mark.skipif(not _cpp_servers, reason="No C++ language server (clangd or ccls) available")
+@pytest.mark.skipif(not _cpp_servers, reason="No C++ language server (clangd) available")
 class TestCppLanguageServer:
-    """Tests for C/C++ language servers (clangd and ccls)."""
+    """Tests for the C/C++ language server (clangd)."""
 
     @pytest.mark.parametrize("language_server", _cpp_servers, indirect=True)
     def test_find_symbol(self, language_server: SolidLanguageServer) -> None:
@@ -99,7 +92,7 @@ class TestCppLanguageServer:
     @pytest.mark.parametrize("language_server", _cpp_servers, indirect=True)
     @pytest.mark.xfail(
         strict=True,
-        reason=("Both clangd and ccls do not support cross-file references for newly created files that were never opened by the LS."),
+        reason=("clangd does not support cross-file references for newly created files that were never opened by the LS."),
     )
     def test_find_references_in_newly_written_file(self, language_server: SolidLanguageServer) -> None:
         # Create a new file that references the 'add' function from b.cpp

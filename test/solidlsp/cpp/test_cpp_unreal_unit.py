@@ -1,4 +1,4 @@
-"""Unreal Engine handling in the clangd and ccls servers, without starting a process.
+"""Unreal Engine handling in the clangd server, without starting a process.
 
 No ``cpp`` marker: these build server shells with ``object.__new__`` and call the no-database
 and directory-ignore code paths directly, so they run in the default suite.
@@ -6,7 +6,6 @@ and directory-ignore code paths directly, so they run in the default suite.
 
 import pytest
 
-from solidlsp.language_servers.ccls_language_server import CCLS
 from solidlsp.language_servers.clangd_language_server import ClangdLanguageServer
 from solidlsp.language_servers.common import UE_IGNORED_DIRNAMES, is_unreal_engine_project
 from solidlsp.ls_exceptions import SolidLSPException
@@ -14,12 +13,6 @@ from solidlsp.ls_exceptions import SolidLSPException
 
 def _make_clangd(root) -> ClangdLanguageServer:
     server = object.__new__(ClangdLanguageServer)
-    server.repository_root_path = str(root)
-    return server
-
-
-def _make_ccls(root) -> CCLS:
-    server = object.__new__(CCLS)
     server.repository_root_path = str(root)
     return server
 
@@ -58,8 +51,8 @@ def test_empty_compile_commands_returns_none_for_non_unreal_project(tmp_path):
     assert server._prepare_compile_commands() is None
 
 
-@pytest.mark.parametrize("make_server", [_make_clangd, _make_ccls])
-def test_unreal_dirs_ignored_only_for_unreal_project(make_server, tmp_path):
+def test_unreal_dirs_ignored_only_for_unreal_project(tmp_path):
+    make_server = _make_clangd
     non_ue = make_server(tmp_path)
     for dirname in UE_IGNORED_DIRNAMES:
         assert not non_ue.is_ignored_dirname(dirname), f"{dirname} should not be pruned without a .uproject"
