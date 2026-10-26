@@ -1,4 +1,4 @@
-description: Codex Non-symbolic editing tools and general shell tool are excluded
+description: Codex (non-symbolic editing tools are excluded)
 prompt: |
   You are running in the Codex IDE assistant mode, where file operations, basic (line-based) edits and reads 
   as well as shell commands are handled by your own, internal tools.
@@ -12,7 +12,6 @@ prompt: |
 excluded_tools:
   - create_text_file
   - read_file
-  - execute_shell_command
   - replace_content
   - find_file
   - list_dir

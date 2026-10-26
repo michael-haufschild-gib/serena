@@ -5,7 +5,6 @@ import logging
 import os
 import pathlib
 import shutil
-import threading
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Hashable, Iterator
@@ -13,12 +12,12 @@ from contextlib import contextmanager
 from copy import copy
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from time import monotonic, perf_counter, sleep
-from typing import Any, Self, Union, cast
+from time import perf_counter, sleep
+from typing import Self, Union, cast
 
 import pathspec
 from sensai.util.helper import mark_used
-from sensai.util.pickle import getstate, load_pickle
+from sensai.util.pickle import getstate
 from sensai.util.string import ToStringMixin
 
 from serena.util.file_system import match_path
@@ -28,7 +27,6 @@ from solidlsp.dependency_provider import (
     LanguageServerDependencyProvider,
     LanguageServerDependencyProviderBaseCommand,
     LanguageServerDependencyProviderSinglePath,
-    LanguageServerDependencyProviderUvx,
 )
 from solidlsp.initialize_params import DefaultInitializeParamsBuilder, InitializeParamsBuilder
 from solidlsp.ls_config import FilenameMatcher, LanguageServerConfig, LanguageServerId
@@ -56,7 +54,7 @@ from solidlsp.lsp_protocol_handler.server import (
     StringDict,
 )
 from solidlsp.settings import SolidLSPSettings
-from solidlsp.util.cache import load_cache, save_cache
+from solidlsp.util.cache import PersistentSymbolCache
 
 RawDocumentSymbol = Union[DocumentSymbol, SymbolInformation]
 """
@@ -71,7 +69,6 @@ log = logging.getLogger(__name__)
 mark_used(
     LanguageServerDependencyProvider,
     LanguageServerDependencyProviderBaseCommand,
-    LanguageServerDependencyProviderUvx,
     LanguageServerDependencyProviderSinglePath,
 )
 
@@ -354,8 +351,7 @@ class SolidLanguageServer(ABC):
     If the result of a language server changes in a way that affects the raw document symbols,
     the LS-specific version should be incremented instead.
     """
-    RAW_DOCUMENT_SYMBOL_CACHE_FILENAME = "raw_document_symbols.pkl"
-    RAW_DOCUMENT_SYMBOL_CACHE_FILENAME_LEGACY_FALLBACK = "document_symbols_cache_v23-06-25.pkl"
+    RAW_DOCUMENT_SYMBOL_CACHE_FILENAME = "raw_document_symbols.sqlite"
     DOCUMENT_SYMBOL_CACHE_VERSION = 4
     """
     defines the version of the high-level document symbol format.
@@ -363,7 +359,9 @@ class SolidLanguageServer(ABC):
     For changes that affect the symbols of a particular language server implementation (subclass),
     change :meth:`_document_symbols_cache_fingerprint` instead.
     """
-    DOCUMENT_SYMBOL_CACHE_FILENAME = "document_symbols.pkl"
+    DOCUMENT_SYMBOL_CACHE_FILENAME = "document_symbols.sqlite"
+    _LEGACY_CACHE_FILENAMES = ("raw_document_symbols.pkl", "document_symbols.pkl", "document_symbols_cache_v23-06-25.pkl")
+    """cache files of the former whole-file pickle format, which are deleted when found"""
 
     # Directories that should always be ignored regardless of language:
     # VCS internals, virtual environments, caches, and serena's own data.
@@ -537,30 +535,20 @@ class SolidLanguageServer(ABC):
         """
         identifies the language server (not to be confused with the language_id passed to the language server)
         """
-        # The source filename matcher is a @cache'd per-language singleton. A previous project may
-        # have extended it (e.g. Perl's file_filter adding .cgi); reset it here so every activation
-        # starts from the language's default extensions, then language-server subclasses re-apply
-        # their own settings during the rest of __init__.
-        self.ls_id.get_source_fn_matcher().reset()
-        self._published_diagnostics: dict[str, list[ls_types.Diagnostic]] = {}
-        self._published_diagnostics_generation_by_uri: dict[str, int] = {}
-        self._published_diagnostics_generation = 0
-        self._published_diagnostics_condition = threading.Condition()
 
         # initialise symbol caches
         self.cache_dir = Path(self._solidlsp_settings.project_data_path) / self.CACHE_FOLDER_NAME / self.language_id
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # * raw document symbols cache
         self._ls_specific_raw_document_symbols_cache_version = cache_version_raw_document_symbols
-        self._raw_document_symbols_cache: dict[str, tuple[str, list[DocumentSymbol] | list[SymbolInformation] | None]] = {}
-        """maps relative file paths to a tuple of (file_content_hash, raw_root_symbols)"""
-        self._raw_document_symbols_cache_is_modified: bool = False
-        self._load_raw_document_symbols_cache()
+        self._delete_legacy_cache_files()
+        self._raw_document_symbols_cache: PersistentSymbolCache[list[DocumentSymbol] | list[SymbolInformation]] = PersistentSymbolCache(
+            self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME, self._raw_document_symbols_cache_version()
+        )
         # * high-level document symbols cache
-        self._document_symbols_cache: dict[str, tuple[str, DocumentSymbols]] = {}
-        """maps relative file paths to a tuple of (file_content_hash, document_symbols)"""
-        self._document_symbols_cache_is_modified: bool = False
-        self._load_document_symbols_cache()
+        self._document_symbols_cache: PersistentSymbolCache[DocumentSymbols] = PersistentSymbolCache(
+            self.cache_dir / self.DOCUMENT_SYMBOL_CACHE_FILENAME, self._document_symbols_cache_version()
+        )
 
         self.server_started = False
         if config.trace_lsp_communication:
@@ -579,7 +567,6 @@ class SolidLanguageServer(ABC):
         """
         the low-level language server interface
         """
-        self.server.on_any_notification(self._observe_server_notification)
 
         # create a pathspec matcher from the given patterns
         self._ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, config.ignored_paths)
@@ -638,7 +625,6 @@ class SolidLanguageServer(ABC):
         """
         self._process_launch_info = None
         self.server = self._create_language_server_interface(self._interface_logging_fn)
-        self.server.on_any_notification(self._observe_server_notification)
 
     def _create_language_server_interface(self, logging_fn: Callable[[str, str, StringDict | str], None] | None) -> LanguageServerInterface:
         """
@@ -660,397 +646,7 @@ class SolidLanguageServer(ABC):
             ls_id=self.ls_id,
             determine_log_level=self._determine_log_level,
             logger=logging_fn,
-            start_independent_lsp_process=self.config.start_independent_lsp_process,
         )
-
-    # --- diagnostics-related functions ---
-
-    def _observe_server_notification(self, method: str, params: Any) -> None:
-        """
-        Observe notifications sent by the language server.
-
-        This is used for generic cross-language bookkeeping that must work independently of
-        language-specific notification handlers.
-        """
-        if method == "textDocument/publishDiagnostics":
-            self._store_published_diagnostics(params)
-
-    def _store_published_diagnostics(self, params: Any) -> None:
-        """
-        Store diagnostics received through ``textDocument/publishDiagnostics``.
-        """
-        if not isinstance(params, dict):
-            return
-
-        uri = params.get("uri")
-        diagnostics = params.get("diagnostics")
-        if not isinstance(uri, str) or not isinstance(diagnostics, list):
-            return
-
-        normalized_diagnostics: list[ls_types.Diagnostic] = []
-        for diagnostic in diagnostics:
-            if not isinstance(diagnostic, dict):
-                continue
-            if "message" not in diagnostic or "range" not in diagnostic:
-                continue
-
-            normalized_diagnostic: ls_types.Diagnostic = {
-                "uri": uri,
-                "message": diagnostic["message"],
-                "range": diagnostic["range"],
-            }
-            severity = diagnostic.get("severity")
-            if isinstance(severity, int):
-                normalized_diagnostic["severity"] = ls_types.DiagnosticSeverity(severity)
-
-            code = diagnostic.get("code")
-            if isinstance(code, int | str):
-                normalized_diagnostic["code"] = code
-
-            if "source" in diagnostic:
-                normalized_diagnostic["source"] = diagnostic["source"]
-            normalized_diagnostics.append(ls_types.Diagnostic(**normalized_diagnostic))
-
-        # canonicalize the key so lookups using URIs produced by pathlib.Path.as_uri() match
-        # what servers publish (e.g. file:///c%3A/... or file:///c:/... vs. file:///C:/...)
-        key = self._canonicalize_published_diagnostics_uri(uri)
-
-        with self._published_diagnostics_condition:
-            self._published_diagnostics_generation += 1
-            self._published_diagnostics[key] = normalized_diagnostics
-            self._published_diagnostics_generation_by_uri[key] = self._published_diagnostics_generation
-            self._published_diagnostics_condition.notify_all()
-
-    @staticmethod
-    def _canonicalize_published_diagnostics_uri(uri: str) -> str:
-        """
-        Canonicalizes a ``file://`` URI so that diagnostics published by language servers
-        and lookups based on ``pathlib.Path.as_uri()`` agree on the same key.
-
-        On Windows, servers may publish under ``file:///c%3A/...`` or ``file:///c:/...`` while
-        ``pathlib.Path.as_uri()`` produces ``file:///C:/...``. The canonical form uses an
-        upper-case drive letter and a plain colon.
-        """
-        if os.name != "nt" or not uri.startswith("file:///"):
-            return uri
-
-        # extract the segment after "file:///" up to the next slash and look for a drive letter
-        prefix = "file:///"
-        rest = uri[len(prefix) :]
-        slash = rest.find("/")
-        head = rest if slash < 0 else rest[:slash]
-        tail = "" if slash < 0 else rest[slash:]
-
-        if (len(head) >= 2 and head[0].isalpha() and head[1] == ":") or (
-            len(head) >= 4 and head[0].isalpha() and head[1:4].lower() == "%3a"
-        ):
-            head = head[0].upper() + ":"
-        else:
-            return uri
-
-        return prefix + head + tail
-
-    def _get_published_diagnostics_generation(self, uri: str) -> int:
-        key = self._canonicalize_published_diagnostics_uri(uri)
-        with self._published_diagnostics_condition:
-            return self._published_diagnostics_generation_by_uri.get(key, -1)
-
-    def _wait_for_published_diagnostics(
-        self,
-        uri: str,
-        after_generation: int,
-        timeout: float,
-    ) -> list[ls_types.Diagnostic] | None:
-        key = self._canonicalize_published_diagnostics_uri(uri)
-        deadline = perf_counter() + timeout
-        with self._published_diagnostics_condition:
-            while True:
-                current_generation = self._published_diagnostics_generation_by_uri.get(key, -1)
-                if current_generation > after_generation:
-                    return list(self._published_diagnostics.get(key, []))
-
-                remaining_timeout = deadline - perf_counter()
-                if remaining_timeout <= 0:
-                    return None
-                self._published_diagnostics_condition.wait(timeout=remaining_timeout)
-
-    def _get_cached_published_diagnostics(self, uri: str) -> list[ls_types.Diagnostic] | None:
-        key = self._canonicalize_published_diagnostics_uri(uri)
-        with self._published_diagnostics_condition:
-            diagnostics = self._published_diagnostics.get(key)
-            if diagnostics is None:
-                return None
-            return list(diagnostics)
-
-    @staticmethod
-    def _diagnostic_matches_range(diagnostic: ls_types.Diagnostic, start_line: int, end_line: int) -> bool:
-        diagnostic_start_line = diagnostic["range"]["start"]["line"]
-        diagnostic_end_line = diagnostic["range"]["end"]["line"]
-
-        # normalize inverted ranges: some servers (e.g. Julia's JuliaSyntax.jl for unterminated
-        # expressions) emit diagnostics whose end position lies before the start position.
-        # treat such ranges as a single span covering both lines.
-        lo = min(diagnostic_start_line, diagnostic_end_line)
-        hi = max(diagnostic_start_line, diagnostic_end_line)
-
-        # when end_line < 0 the caller imposes no upper bound; only enforce the lower bound.
-        if end_line < 0:
-            return hi >= start_line
-        return lo <= end_line and hi >= start_line
-
-    @staticmethod
-    def _diagnostic_matches_min_severity(diagnostic: ls_types.Diagnostic, min_severity: int) -> bool:
-        severity = diagnostic.get("severity")
-        if severity is None:
-            return True
-        return int(severity) <= min_severity
-
-    @classmethod
-    def _filter_diagnostics(
-        cls,
-        diagnostics: list[ls_types.Diagnostic],
-        start_line: int,
-        end_line: int,
-        min_severity: int,
-    ) -> list[ls_types.Diagnostic]:
-        diagnostics = [d for d in diagnostics if cls._diagnostic_matches_range(d, start_line, end_line)]
-        diagnostics = [d for d in diagnostics if cls._diagnostic_matches_min_severity(d, min_severity)]
-        return diagnostics
-
-    def _validate_text_document_diagnostics_request(
-        self,
-        relative_file_path: str,
-        start_line: int,
-        end_line: int,
-        min_severity: int,
-    ) -> str:
-        if not self.server_started:
-            log.error("request_text_document_diagnostics called before Language Server started")
-            raise SolidLSPException("Language Server not started")
-        if start_line < 0:
-            raise ValueError(f"start_line must be non-negative, got {start_line}")
-        if end_line != -1 and end_line < start_line:
-            raise ValueError(f"end_line must be -1 or >= start_line, got {end_line} < {start_line}")
-        if min_severity not in {1, 2, 3, 4}:
-            raise ValueError(f"min_severity must be one of 1, 2, 3, 4, got {min_severity}")
-        return pathlib.Path(str(PurePath(self.repository_root_path, relative_file_path))).as_uri()
-
-    def get_published_diagnostics_generation(self, relative_file_path: str) -> int:
-        """
-        Get the generation number for the latest published diagnostics of a file.
-
-        :param relative_file_path: The relative path of the file.
-        :return: the generation number, or ``-1`` if none were published yet.
-        """
-        uri = pathlib.Path(str(PurePath(self.repository_root_path, relative_file_path))).as_uri()
-        return self._get_published_diagnostics_generation(uri)
-
-    def get_cached_published_text_document_diagnostics(
-        self,
-        relative_file_path: str,
-        start_line: int = 0,
-        end_line: int = -1,
-        min_severity: int = 4,
-    ) -> list[ls_types.Diagnostic] | None:
-        """
-        Get cached diagnostics received through ``textDocument/publishDiagnostics``.
-
-        :param relative_file_path: The relative path of the file to retrieve diagnostics for.
-        :param start_line: the first 0-based line to include in the result.
-        :param end_line: the last 0-based line to include in the result. ``-1`` means no upper bound.
-        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
-            Diagnostics with lower-or-equal numeric severity are returned.
-        :return: the cached diagnostics, or ``None`` if no diagnostics were published yet.
-        """
-        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
-        diagnostics = self._get_cached_published_diagnostics(uri)
-        if diagnostics is None:
-            return None
-        return self._filter_diagnostics(diagnostics, start_line, end_line, min_severity)
-
-    def request_published_text_document_diagnostics(
-        self,
-        relative_file_path: str,
-        after_generation: int = -1,
-        timeout: float = 2.5,
-        start_line: int = 0,
-        end_line: int = -1,
-        min_severity: int = 4,
-        allow_cached: bool = True,
-    ) -> list[ls_types.Diagnostic] | None:
-        """
-        Wait for diagnostics received through ``textDocument/publishDiagnostics`` and return them.
-
-        :param relative_file_path: The relative path of the file to retrieve diagnostics for.
-        :param after_generation: only return diagnostics published after this generation. ``-1`` accepts the next publication.
-        :param timeout: the maximum time to wait for a newer publication.
-        :param start_line: the first 0-based line to include in the result.
-        :param end_line: the last 0-based line to include in the result. ``-1`` means no upper bound.
-        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
-            Diagnostics with lower-or-equal numeric severity are returned.
-        :param allow_cached: whether to fall back to the current cached diagnostics if no newer publication arrives in time.
-        :return: the published diagnostics, or ``None`` if no diagnostics are available.
-        """
-        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
-        published_uri = self._get_published_diagnostics_uri(uri)
-        diagnostics: list[ls_types.Diagnostic] | None = None
-
-        # keeping the document open
-        with self.open_file(relative_file_path):
-            diagnostics = self._wait_for_relevant_published_diagnostics(
-                uri=published_uri,
-                after_generation=after_generation,
-                timeout=timeout,
-                allow_cached=allow_cached,
-            )
-
-        if diagnostics is None:
-            return None
-
-        return self._filter_diagnostics(diagnostics, start_line, end_line, min_severity)
-
-    def _get_published_diagnostics_uri(self, request_uri: str) -> str:
-        """
-        Gets the URI under which published diagnostics should be looked up.
-        """
-        return request_uri
-
-    def _supports_pull_diagnostics(self) -> bool:
-        """
-        Whether the language server handles ``textDocument/diagnostic`` (LSP 3.17 pull
-        diagnostics) gracefully. Subclasses should override and return ``False`` when the
-        underlying server does not implement pull diagnostics, especially when sending
-        the request would terminate the server (e.g. LanguageServer.jl raises an error
-        for unknown methods that crashes the process).
-        """
-        return True
-
-    def _get_published_diagnostics_wait_timeout(self, pull_diagnostics_failed: bool) -> float:
-        """
-        Gets the timeout for waiting on published diagnostics after a diagnostics request.
-        """
-        return 2.5
-
-    def _accept_published_diagnostics(self, diagnostics: list[ls_types.Diagnostic]) -> bool:
-        """
-        Determines whether a published diagnostics payload should satisfy the current wait.
-        """
-        return bool(diagnostics)
-
-    def _wait_for_relevant_published_diagnostics(
-        self,
-        uri: str,
-        after_generation: int,
-        timeout: float,
-        allow_cached: bool = True,
-    ) -> list[ls_types.Diagnostic] | None:
-        """
-        Waits for a published diagnostics payload that is relevant for the current request.
-        """
-        deadline = monotonic() + timeout
-        current_after_generation = after_generation
-
-        while True:
-            remaining_timeout = deadline - monotonic()
-            if remaining_timeout <= 0:
-                break
-
-            diagnostics = self._wait_for_published_diagnostics(
-                uri=uri,
-                after_generation=current_after_generation,
-                timeout=remaining_timeout,
-            )
-            if diagnostics is None:
-                break
-            if self._accept_published_diagnostics(diagnostics):
-                return diagnostics
-            current_after_generation = self._get_published_diagnostics_generation(uri)
-
-        if allow_cached:
-            diagnostics = self._get_cached_published_diagnostics(uri)
-            if diagnostics is not None and self._accept_published_diagnostics(diagnostics):
-                return diagnostics
-
-        return None
-
-    def request_text_document_diagnostics(
-        self,
-        relative_file_path: str,
-        start_line: int = 0,
-        end_line: int = -1,
-        min_severity: int = 4,
-    ) -> list[ls_types.Diagnostic]:
-        """
-        Raise a [textDocument/diagnostic](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_diagnostic) request to the Language Server
-        to find diagnostics for the given file. Wait for the response and return the result.
-
-        :param relative_file_path: The relative path of the file to retrieve diagnostics for
-        :param start_line: the first 0-based line to include in the result.
-        :param end_line: the last 0-based line to include in the result. `-1` means no upper bound.
-        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
-            Diagnostics with lower-or-equal numeric severity are returned.
-
-        :return: A list of diagnostics for the file
-        """
-        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
-        published_uri = self._get_published_diagnostics_uri(uri)
-        diagnostics_before_request = self._get_published_diagnostics_generation(published_uri)
-        ret: list[ls_types.Diagnostic] | None = None
-        pull_diagnostics_failed = False
-
-        with self.open_file(relative_file_path):
-            response: Any = None
-            # only send pull diagnostics when the server actually supports it; some servers
-            # (e.g. Julia's LanguageServer.jl) hard-error and crash the process on unknown methods
-            if self._supports_pull_diagnostics():
-                try:
-                    response = self.server.send.text_document_diagnostic(
-                        {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
-                            LSPConstants.TEXT_DOCUMENT: {
-                                LSPConstants.URI: uri,
-                            }
-                        }
-                    )
-                except SolidLSPException as ex:
-                    # Termination must propagate so tools_base can restart the LS and retry.
-                    # Other pull-diagnostics failures (e.g. unsupported method without crash)
-                    # still fall back to published diagnostics.
-                    if ex.is_language_server_terminated():
-                        raise
-                    log.debug("Falling back to published diagnostics for %s due to pull-diagnostics error: %s", relative_file_path, ex)
-                    response = None
-                    pull_diagnostics_failed = True
-
-            if response is not None:
-                assert isinstance(response, dict), (
-                    f"Unexpected response from Language Server (expected list, got {type(response)}): {response}"
-                )
-                ret = []
-                for item in response["items"]:  # type: ignore
-                    new_item: ls_types.Diagnostic = {
-                        "uri": uri,
-                        "severity": item["severity"],
-                        "message": item["message"],
-                        "range": item["range"],
-                        "code": item.get("code"),  # type: ignore
-                    }
-                    if "source" in item:
-                        new_item["source"] = item["source"]
-                    ret.append(ls_types.Diagnostic(**new_item))
-
-            if not ret:
-                published_diagnostics = self._wait_for_relevant_published_diagnostics(
-                    uri=published_uri,
-                    after_generation=diagnostics_before_request,
-                    timeout=self._get_published_diagnostics_wait_timeout(pull_diagnostics_failed),
-                )
-                if published_diagnostics is not None:
-                    ret = published_diagnostics
-
-        if ret is None:
-            return []
-
-        return self._filter_diagnostics(ret, start_line, end_line, min_severity)
 
     def _get_wait_time_for_cross_file_referencing(self) -> float:
         """Meant to be overridden by subclasses for LS that don't have a reliable "finished initializing" signal.
@@ -1907,8 +1503,7 @@ class SolidLanguageServer(ABC):
             # has not yet finished indexing or building the project (e.g. Lean 4 before `lake build`),
             # and caching it would permanently serve stale data even after the project is ready.
             if response:
-                self._raw_document_symbols_cache[cache_key] = (fd.content_hash, response)
-                self._raw_document_symbols_cache_is_modified = True
+                self._raw_document_symbols_cache.put(cache_key, fd.content_hash, response)
 
             return response
 
@@ -2064,8 +1659,7 @@ class SolidLanguageServer(ABC):
             # update cache
             content_hash = file_data.content_hash
             log.debug("Updating cached document symbols for %s (hash=%s)", relative_file_path, content_hash)
-            self._document_symbols_cache[cache_key] = (content_hash, document_symbols)
-            self._document_symbols_cache_is_modified = True
+            self._document_symbols_cache.put(cache_key, content_hash, document_symbols)
 
             return document_symbols
 
@@ -2980,24 +2574,6 @@ class SolidLanguageServer(ABC):
             version.append(raw_fingerprint)
         return version[0] if len(version) == 1 else tuple(version)
 
-    def _save_raw_document_symbols_cache(self) -> None:
-        cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME
-
-        if not self._raw_document_symbols_cache_is_modified:
-            log.debug("No changes to raw document symbols cache, skipping save")
-            return
-
-        log.info("Saving updated raw document symbols cache to %s", cache_file)
-        try:
-            save_cache(str(cache_file), self._raw_document_symbols_cache_version(), self._raw_document_symbols_cache)
-            self._raw_document_symbols_cache_is_modified = False
-        except Exception as e:
-            log.error(
-                "Failed to save raw document symbols cache to %s: %s. Note: this may have resulted in a corrupted cache file.",
-                cache_file,
-                e,
-            )
-
     def _raw_document_symbols_cache_fingerprint(self) -> Hashable | None:
         """
         Returns a fingerprint of any language server-specific aspects that result in changes
@@ -3028,89 +2604,19 @@ class SolidLanguageServer(ABC):
             return (*base_version, fingerprint)
         return base_version
 
-    def _load_raw_document_symbols_cache(self) -> None:
-        cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME
+    def _delete_legacy_cache_files(self) -> None:
+        for filename in self._LEGACY_CACHE_FILENAMES:
+            legacy_file = self.cache_dir / filename
+            if legacy_file.exists():
+                log.info("Deleting symbol cache file of the former format: %s", legacy_file)
+                legacy_file.unlink(missing_ok=True)
 
-        if not cache_file.exists():
-            # check for legacy cache to load to migrate
-            legacy_cache_file = self.cache_dir / self.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME_LEGACY_FALLBACK
-            if legacy_cache_file.exists():
-                try:
-                    legacy_cache: dict[
-                        str, tuple[str, tuple[list[ls_types.UnifiedSymbolInformation], list[ls_types.UnifiedSymbolInformation]]]
-                    ] = load_pickle(legacy_cache_file)
-                    log.info("Migrating legacy document symbols cache with %d entries", len(legacy_cache))
-                    num_symbols_migrated = 0
-                    migrated_cache = {}
-                    for cache_key, (file_hash, (all_symbols, root_symbols)) in legacy_cache.items():
-                        if cache_key.endswith("-True"):  # include_body=True
-                            new_cache_key = cache_key[:-5]
-                            migrated_cache[new_cache_key] = (file_hash, root_symbols)
-                            num_symbols_migrated += len(all_symbols)
-                    log.info("Migrated %d document symbols from legacy cache", num_symbols_migrated)
-                    self._raw_document_symbols_cache = migrated_cache
-                    self._raw_document_symbols_cache_is_modified = True
-                    self._save_raw_document_symbols_cache()
-                    legacy_cache_file.unlink()
-                    return
-                except Exception as e:
-                    log.error("Error during cache migration: %s", e)
-                    return
-
-        # load existing cache (if any)
-        if cache_file.exists():
-            log.info("Loading document symbols cache from %s", cache_file)
-            try:
-                saved_cache = load_cache(str(cache_file), self._raw_document_symbols_cache_version())
-                if saved_cache is not None:
-                    self._raw_document_symbols_cache = saved_cache
-                    log.info(f"Loaded {len(self._raw_document_symbols_cache)} entries from raw document symbols cache.")
-            except Exception as e:
-                # cache can become corrupt, so just skip loading it
-                log.warning(
-                    "Failed to load raw document symbols cache from %s (%s); Ignoring cache.",
-                    cache_file,
-                    e,
-                )
-
-    def _save_document_symbols_cache(self) -> None:
-        cache_file = self.cache_dir / self.DOCUMENT_SYMBOL_CACHE_FILENAME
-
-        if not self._document_symbols_cache_is_modified:
-            log.debug("No changes to document symbols cache, skipping save")
-            return
-
-        log.info("Saving updated document symbols cache to %s", cache_file)
-        try:
-            save_cache(str(cache_file), self._document_symbols_cache_version(), self._document_symbols_cache)
-            self._document_symbols_cache_is_modified = False
-        except Exception as e:
-            log.error(
-                "Failed to save document symbols cache to %s: %s. Note: this may have resulted in a corrupted cache file.",
-                cache_file,
-                e,
-            )
-
-    def _load_document_symbols_cache(self) -> None:
-        cache_file = self.cache_dir / self.DOCUMENT_SYMBOL_CACHE_FILENAME
-        if cache_file.exists():
-            log.info("Loading document symbols cache from %s", cache_file)
-            try:
-                saved_cache = load_cache(str(cache_file), self._document_symbols_cache_version())
-                if saved_cache is not None:
-                    self._document_symbols_cache = saved_cache
-                    log.info(f"Loaded {len(self._document_symbols_cache)} entries from document symbols cache.")
-            except Exception as e:
-                # cache can become corrupt, so just skip loading it
-                log.warning(
-                    "Failed to load document symbols cache from %s (%s); Ignoring cache.",
-                    cache_file,
-                    e,
-                )
-
-    def save_cache(self) -> None:
-        self._save_raw_document_symbols_cache()
-        self._save_document_symbols_cache()
+    def close_caches(self) -> None:
+        """
+        Closes the persistent symbol caches; entries are persisted as they are added, so nothing is lost.
+        """
+        self._raw_document_symbols_cache.close()
+        self._document_symbols_cache.close()
 
     def request_workspace_symbol(self, query: str) -> list[ls_types.UnifiedSymbolInformation] | None:
         """

@@ -14,10 +14,6 @@ SERENAS_OWN_CONTEXT_YAMLS_DIR = str(_resources_path / "config" / "contexts")
 """The contexts that are shipped with the Serena package, i.e. the default contexts."""
 SERENAS_OWN_MODE_YAMLS_DIR = str(_resources_path / "config" / "modes")
 """The modes that are shipped with the Serena package, i.e. the default modes."""
-INTERNAL_MODE_YAMLS_DIR = str(_resources_path / "config" / "internal_modes")
-"""Internal modes, never overridden by user modes."""
-SERENA_DASHBOARD_DIR = str(_resources_path / "dashboard")
-SERENA_ICON_DIR = str(_resources_path / "icons")
 
 DEFAULT_SOURCE_FILE_ENCODING = "utf-8"
 """The default encoding assumed for project source files."""
@@ -32,12 +28,6 @@ SERENA_CONFIG_TEMPLATE_FILE = str(_resources_path / "serena_config.template.yml"
 
 SERENA_LOG_FORMAT = "%(levelname)-5s %(asctime)-15s [%(threadName)s] %(name)s:%(funcName)s:%(lineno)d - %(message)s"
 
-LOG_MESSAGES_BUFFER_SIZE = 2500
-"""The maximum number of log messages to keep in the buffer (for the dashboard)."""
-
 
 class SerenaPorts:
-    TRAY_MANAGER_PORT = 0x5EA0
     PROJECT_SERVER_PORT = 0x5EA1
-    JETBRAINS_PLUGIN_SERVER_BASE_PORT = 0x5EA2
-    DASHBOARD_API_BASE_PORT = 0x5EDA

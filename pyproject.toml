@@ -33,11 +33,6 @@ dependencies = [
   "docstring_parser==0.17.0",
   "joblib==1.5.1",
   "tqdm==4.67.1",
-  "tiktoken==0.12.0",
-  "anthropic==0.117.0",
-  "beautifulsoup4==4.14.2",
-  "pywebview==6.2",
-  "pystray==0.19.5",
   # Transitive deps pinned for security (dependabot alerts).
   # Exact pins because uvx installs from git, ignoring the lock file.
   "urllib3==2.7.0",
@@ -47,7 +42,6 @@ dependencies = [
   "filelock==3.25.2",
   "cryptography==50.0.0",
   "regex==2026.2.28",
-  "oslex==2.0.0",
 ]
 
 
@@ -93,7 +87,7 @@ dev = [
   "pyasn1==0.6.4",
   "PyJWT==2.12.0",
 ]
-agno = ["agno==2.6.6", "sqlalchemy==2.0.41"]  # agno bumped for session state overwrite CVE
+agno = ["agno==2.6.6", "sqlalchemy==2.0.41", "anthropic==0.117.0"]  # agno bumped for session state overwrite CVE; anthropic backs agno's Claude model
 google = ["google-genai==1.27.0"]
 
 [project.urls]
@@ -107,14 +101,13 @@ max-line-length = 1000
 
 [tool.ty.environment]
 python-version = "3.11"
-# Analyze for all platforms rather than defaulting to the OS ty happens to run on. This keeps the
-# check deterministic across the CI matrix (Linux/Windows/macOS) and lets platform-conditional stdlib
-# members (e.g. subprocess.CREATE_NO_WINDOW, ctypes.windll, pwd) resolve without per-OS type-ignores.
-python-platform = "all"
+# Serena only runs on macOS, so the check analyzes the darwin platform: platform-conditional stdlib
+# members resolve as they do at runtime, independent of the OS ty happens to run on.
+python-platform = "darwin"
 
 [tool.ty.rules]
 # Mirror mypy's ignore_missing_imports=true: optional extras (e.g. agno, google-genai) and
-# platform-specific modules (e.g. AppKit on macOS) are not installed in the default dev environment,
+# platform-specific modules are not installed in the default dev environment,
 # so we do not want unresolvable imports to fail the type check.
 unresolved-import = "ignore"
 possibly-missing-submodule = "ignore"

@@ -3,8 +3,6 @@ import subprocess
 
 from pydantic import BaseModel
 
-from solidlsp.util.subprocess_util import subprocess_kwargs
-
 
 class ShellCommandResult(BaseModel):
     stdout: str
@@ -35,7 +33,6 @@ def execute_shell_command(command: str, cwd: str | None = None, capture_stderr: 
         encoding="utf-8",
         errors="replace",
         cwd=cwd,
-        **subprocess_kwargs(),
     )
 
     stdout, stderr = process.communicate()
@@ -46,7 +43,7 @@ def subprocess_check_output(
     args: list[str], encoding: str = "utf-8", strip: bool = True, timeout: float | None = None, cwd: str | None = None
 ) -> str:
     output = subprocess.check_output(
-        args, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, env=os.environ.copy(), cwd=cwd, **subprocess_kwargs()
+        args, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=timeout, env=os.environ.copy(), cwd=cwd
     ).decode(encoding)
     if strip:
         output = output.strip()

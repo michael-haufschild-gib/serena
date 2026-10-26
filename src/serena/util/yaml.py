@@ -1,7 +1,6 @@
 import logging
 import os
 import tempfile
-import time
 from collections.abc import Sequence
 from enum import Enum
 from typing import Any
@@ -223,31 +222,13 @@ def save_yaml(path: str, data: dict | CommentedMap, preserve_comments: bool = Tr
     try:
         with os.fdopen(fd, "w", encoding=SERENA_FILE_ENCODING) as f:
             yaml.dump(data, f)
-        _replace_with_retry(tmp, path)
+        os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
-
-
-def _replace_with_retry(src: str, dst: str, *, attempts: int = 10, delay_s: float = 0.05) -> None:
-    """``os.replace(src, dst)`` with a short retry on a Windows sharing violation.
-
-    On Windows the atomic rename fails with ``PermissionError`` (WinError 5/32) if another process
-    momentarily holds ``dst`` open — e.g. a second Serena process reading or replacing the same
-    config. A brief bounded retry rides out that contention; the temp file is still complete, so we
-    never fall back to a non-atomic write.
-    """
-    for attempt in range(attempts):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if attempt == attempts - 1:
-                raise
-            time.sleep(delay_s)
 
 
 def yaml_comment_entry_is_empty(comment_entry: Any) -> bool:

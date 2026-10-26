@@ -1,21 +1,16 @@
-"""Regression test for issue #1490: a SIGKILLed Serena leaves its language server process running.
+"""Regression tests for issue #1490: a SIGKILLed Serena must not leave its language servers running.
 
-``StdioLanguageServer`` starts every LSP process in its own session
-(``start_independent_lsp_process`` defaults to True, see ``ls_config.py``) so that our own
-graceful-shutdown code can walk and terminate the whole process tree on a clean exit
-(``subprocess_util.terminate_process_tree_with_kill_fallback``). That code never runs if Serena
-itself is killed (SIGKILL, OOM, crash), and being in its own session means no signal to our
-process group reaches the child either, so it survives as a PPID=1 orphan.
+``StdioLanguageServer`` starts every language server process in its own session, so that a clean
+shutdown can terminate the whole process group. That code never runs if Serena itself is killed
+(SIGKILL, OOM, crash), and being in its own session means no signal to Serena's process group
+reaches the language server either; ``subprocess_util.ProcessGroupReaper`` closes that gap.
 
-This drives a real ``StdioLanguageServer`` in a child ("fake Serena") process, SIGKILLs that
-child, and checks whether the language server process it started is still alive afterwards.
-Linux only: the fix is ``prctl(PR_SET_PDEATHSIG)``, which has no equivalent exercised here on
-other platforms.
+These tests drive a real ``StdioLanguageServer`` in a child ("fake Serena") process and check what
+is still alive after that process is killed.
 """
 
 from __future__ import annotations
 
-import platform
 import subprocess
 import sys
 import textwrap
@@ -23,13 +18,11 @@ import time
 import uuid
 
 import psutil
-import pytest
-
-pytestmark = pytest.mark.skipif(platform.system() != "Linux", reason="PR_SET_PDEATHSIG is Linux-specific")
 
 _DRIVER_SRC = textwrap.dedent(
     """
     import sys
+    import time
     from solidlsp.ls_config import LanguageServerId
     from solidlsp.ls_process import StdioLanguageServer
     from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
@@ -37,13 +30,20 @@ _DRIVER_SRC = textwrap.dedent(
     marker = sys.argv[1]
     ls = StdioLanguageServer(
         process_launch_info=ProcessLaunchInfo(
-            cmd=[sys.executable, "-c", f"import time; time.sleep(300)  # {marker}"],
+            cmd=[
+                sys.executable,
+                "-c",
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)  # {marker}-child']); "
+                f"time.sleep(300)  # {marker}",
+            ],
             cwd="/tmp",
         ),
         ls_id=LanguageServerId.PYTHON,
         determine_log_level=lambda _line: 0,
     )
     ls._start()
+    time.sleep(1)  # let the language server spawn its own child
     print("READY", flush=True)
     time.sleep(600)
     """
@@ -99,15 +99,10 @@ _THREAD_DRIVER_SRC = textwrap.dedent(
 
 def test_language_server_process_survives_a_short_lived_calling_thread() -> None:
     """
-    PR_SET_PDEATHSIG (per prctl(2)) ties the registration to the specific calling *thread*, not
-    the process: if that thread terminates while the rest of the process lives on, the kernel
-    delivers the death signal right then, even though "Serena" (the process) never died. Starting
-    a language server is dispatched through TaskExecutor onto exactly such a short-lived thread, so
-    a naive preexec_fn registration kills the language server itself within milliseconds of a normal
-    startup, independent of any real SIGKILL scenario -- this is the CI-only regression this test
-    guards against.
+    Starting a language server is dispatched onto a short-lived thread; the language server must
+    live on after that thread has terminated, as long as Serena (the process) is alive.
     """
-    marker = f"pdeathsig-thread-test-{uuid.uuid4().hex}"
+    marker = f"orphan-thread-test-{uuid.uuid4().hex}"
     driver = subprocess.Popen(
         [sys.executable, "-c", _THREAD_DRIVER_SRC, marker],
         stdout=subprocess.PIPE,
@@ -135,7 +130,7 @@ def test_language_server_process_survives_a_short_lived_calling_thread() -> None
 
 
 def test_language_server_process_dies_with_a_sigkilled_serena() -> None:
-    marker = f"pdeathsig-test-{uuid.uuid4().hex}"
+    marker = f"orphan-test-{uuid.uuid4().hex}"
     driver = subprocess.Popen(
         [sys.executable, "-c", _DRIVER_SRC, marker],
         stdout=subprocess.PIPE,
@@ -145,7 +140,8 @@ def test_language_server_process_dies_with_a_sigkilled_serena() -> None:
     try:
         ready_line = driver.stdout.readline()
         assert ready_line.strip() == "READY", f"driver failed to start the language server: {driver.stderr.read()}"
-        assert _find_marked_processes(marker), "language server process never started"
+        started = [p for p in _find_marked_processes(marker) if p.pid != driver.pid]
+        assert len(started) == 2, f"expected the language server and its child to be running, found {started}"
 
         driver.kill()  # SIGKILL: simulates Serena being killed without a chance to clean up
         driver.wait(timeout=5)
@@ -155,10 +151,11 @@ def test_language_server_process_dies_with_a_sigkilled_serena() -> None:
         while survivors and time.monotonic() < deadline:
             time.sleep(0.2)
             survivors = _find_marked_processes(marker)
+        survivors = [p for p in survivors if p.status() != psutil.STATUS_ZOMBIE]
 
         assert not survivors, (
             f"language server process(es) {[p.pid for p in survivors]} survived a SIGKILLed Serena "
-            "(orphaned, will run until manually killed -- issue #1490)"
+            "(orphaned, would run until manually killed -- issue #1490)"
         )
     finally:
         for proc in _find_marked_processes(marker):

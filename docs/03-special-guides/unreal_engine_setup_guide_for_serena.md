@@ -101,7 +101,7 @@ reconnect or restart the MCP after creating it. Serena reads the database only a
 
 Generated reflection code (`*.gen.cpp`, `*.generated.h`) legitimately references your
 functions, so symbol results could otherwise include hits inside `Intermediate/`. When a
-`.uproject` file is present at the project root, the clangd and ccls language servers skip
+`.uproject` file is present at the project root, the clangd language server skips
 UE's build and cache directories (`Binaries`, `DerivedDataCache`, `Intermediate`, `Saved`)
 during indexing. This is automatic and needs no configuration.
 

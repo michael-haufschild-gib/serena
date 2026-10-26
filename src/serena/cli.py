@@ -5,7 +5,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from collections.abc import Iterator, Sequence
 from logging import Logger
 from pathlib import Path
@@ -21,7 +20,6 @@ from serena import serena_version
 from serena.config.client_setup import client_setup_handlers
 from serena.config.context_mode import SerenaAgentContext, SerenaAgentMode
 from serena.config.serena_config import (
-    LanguageBackend,
     ModeSelectionDefinition,
     ModeSelectionDefinitionWithAddedModes,
     ProjectConfig,
@@ -39,10 +37,8 @@ from serena.constants import (
 from serena.prompt_factory import SerenaPromptFactory
 from serena.tools import ActivateProjectTool
 from serena.util.cli_util import AutoRegisteringGroup
-from serena.util.logging import MemoryLogHandler
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind
-from solidlsp.util.subprocess_util import subprocess_kwargs
 
 if TYPE_CHECKING:
     from serena.memories.memory_manager import MemoryManager
@@ -104,21 +100,13 @@ def find_project_root(root: str | Path | None = None) -> str | None:
 
 
 def _open_in_editor(path: str) -> None:
-    """Open the given file in the system's default editor or viewer."""
+    """Open the given file in the editor named by $EDITOR or, if unset, in the default application (via `open`)."""
     editor = os.environ.get("EDITOR")
-    run_kwargs = subprocess_kwargs()
     try:
         if editor:
-            subprocess.run([editor, path], check=False, **run_kwargs)
-        elif sys.platform.startswith("win"):
-            try:
-                os.startfile(path)
-            except OSError:
-                subprocess.run(["notepad.exe", path], check=False, **run_kwargs)
-        elif sys.platform == "darwin":
-            subprocess.run(["open", path], check=False, **run_kwargs)
+            subprocess.run([editor, path], check=False)
         else:
-            subprocess.run(["xdg-open", path], check=False, **run_kwargs)
+            subprocess.run(["open", path], check=False)
     except Exception as e:
         print(f"Failed to open {path}: {e}")
 
@@ -172,22 +160,22 @@ class TopLevelCommands(AutoRegisteringGroup):
     @staticmethod
     @click.command(
         "init",
-        help="Initialize Serena by creating a global config file with the specified default language backend.",
+        help="Initialize Serena by creating the global config file (if it does not exist yet).",
         context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
     )
     @click.option(
         "--language-backend",
         "-b",
-        type=click.Choice([b.value for b in LanguageBackend]),
-        default=LanguageBackend.LSP.value,
-        show_default=True,
-        help="Default code intelligence backend (can be overridden in the project config).",
+        "_language_backend",
+        type=str,
+        default=None,
+        hidden=True,
+        help="Removed (language servers are the only backend); still accepted and ignored for backward compatibility.",
     )
-    def init(language_backend: Literal["LSP", "JetBrains"] = "LSP") -> None:
+    def init(_language_backend: str | None = None) -> None:
         click.echo(f"\nSerena version: {serena_version()}\n")
-        serena_config = SerenaConfig.init(language_backend=LanguageBackend(language_backend))
+        serena_config = SerenaConfig.from_config_file()
         click.echo(f"Configuration file: {serena_config.config_file_path}")
-        click.echo(f"Language backend: {language_backend}")
 
         # check for auto-configurable clients
         applicable_setup_handlers = []
@@ -230,7 +218,11 @@ class TopLevelCommands(AutoRegisteringGroup):
             raise SystemExit(1)
 
     @staticmethod
-    @click.command("start-mcp-server", help="Starts the Serena MCP server.", context_settings={"max_content_width": _MAX_CONTENT_WIDTH})
+    @click.command(
+        "start-mcp-server",
+        help="Starts the Serena MCP server (serving via stdio).",
+        context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
+    )
     @click.option("--project", "project", type=PROJECT_TYPE, default=None, help="Path or name of project to activate at startup.")
     @click.option("--project-file", "project", type=PROJECT_TYPE, default=None, help="[DEPRECATED] Use --project instead.")
     @click.argument("project_file_arg", type=PROJECT_TYPE, required=False, default=None, metavar="")
@@ -255,51 +247,40 @@ class TopLevelCommands(AutoRegisteringGroup):
         show_default=False,
         help=_ADD_MODES_EXPLANATION,
     )
+    # Removed features whose flags existing client launch configurations still pass
+    # (e.g. Codex: `--enable-web-dashboard False --open-web-dashboard False`):
+    # they are accepted and ignored so that these configurations keep working.
     @click.option(
         "--language-backend",
-        type=click.Choice([lb.value for lb in LanguageBackend]),
-        default=None,
-        help="Override the configured language backend.",
-    )
-    @click.option(
-        "--transport",
-        type=click.Choice(["stdio", "sse", "streamable-http"]),
-        default="stdio",
-        show_default=True,
-        help="Transport protocol.",
-    )
-    @click.option(
-        "--host",
+        "_language_backend",
         type=str,
-        default="127.0.0.1",
-        show_default=True,
-        help="Listen address for the MCP server (when using corresponding transport).",
-    )
-    @click.option(
-        "--port", type=int, default=8000, show_default=True, help="Listen port for the MCP server (when using corresponding transport)."
+        default=None,
+        hidden=True,
+        help="Removed (language servers are the only backend); still accepted and ignored for backward compatibility.",
     )
     @click.option(
         "--enable-web-dashboard",
-        type=bool,
-        is_flag=False,
+        "_enable_web_dashboard",
+        type=str,
         default=None,
-        help="Enable the web dashboard (overriding the setting in Serena's config). "
-        "It is recommended to always enable the dashboard. If you don't want the browser to open on startup, set open-web-dashboard to False. "
-        "For more information, see\nhttps://oraios.github.io/serena/02-usage/060_dashboard.html",
+        hidden=True,
+        help="Removed (the web dashboard no longer exists); still accepted and ignored for backward compatibility.",
     )
     @click.option(
         "--enable-gui-log-window",
-        type=bool,
-        is_flag=False,
+        "_enable_gui_log_window",
+        type=str,
         default=None,
-        help="Enable the gui log window (currently only displays logs; overriding the setting in Serena's config).",
+        hidden=True,
+        help="Removed (the GUI log window no longer exists); still accepted and ignored for backward compatibility.",
     )
     @click.option(
         "--open-web-dashboard",
-        type=bool,
-        is_flag=False,
+        "_open_web_dashboard",
+        type=str,
         default=None,
-        help="Open Serena's dashboard in your browser after MCP server startup (overriding the setting in Serena's config).",
+        hidden=True,
+        help="Removed (the web dashboard no longer exists); still accepted and ignored for backward compatibility.",
     )
     @click.option(
         "--log-level",
@@ -322,13 +303,10 @@ class TopLevelCommands(AutoRegisteringGroup):
         context: str,
         default_modes: Sequence[str],
         added_modes: Sequence[str],
-        language_backend: str | None,
-        transport: Literal["stdio", "sse", "streamable-http"],
-        host: str,
-        port: int,
-        enable_web_dashboard: bool | None,
-        open_web_dashboard: bool | None,
-        enable_gui_log_window: bool | None,
+        _language_backend: str | None,
+        _enable_web_dashboard: str | None,
+        _enable_gui_log_window: str | None,
+        _open_web_dashboard: str | None,
         log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None,
         trace_lsp_communication: bool | None,
         tool_timeout: float | None,
@@ -336,14 +314,11 @@ class TopLevelCommands(AutoRegisteringGroup):
         from serena.mcp import SerenaMCPFactory
 
         # initialize logging, using INFO level initially (will later be adjusted by SerenaAgent according to the config)
-        #   * memory log handler (for use by GUI/Dashboard)
         #   * stream handler for stderr (for direct console output, which will also be captured by clients like Claude Desktop)
         #   * file handler
         # (Note that stdout must never be used for logging, as it is used by the MCP server to communicate with the client.)
         Logger.root.setLevel(logging.INFO)
         formatter = logging.Formatter(SERENA_LOG_FORMAT)
-        memory_log_handler = MemoryLogHandler()
-        Logger.root.addHandler(memory_log_handler)
         stderr_handler = logging.StreamHandler(stream=sys.stderr)
         stderr_handler.formatter = formatter
         Logger.root.addHandler(stderr_handler)
@@ -377,15 +352,9 @@ class TopLevelCommands(AutoRegisteringGroup):
         if default_modes or added_modes:
             mode_selection_def = ModeSelectionDefinitionWithAddedModes(default_modes=default_modes or None, added_modes=added_modes or None)
 
-        factory = SerenaMCPFactory(transport=transport, context=context, project=project_file, memory_log_handler=memory_log_handler)
+        factory = SerenaMCPFactory(context=context, project=project_file)
         server = factory.create_mcp_server(
-            host=host,
-            port=port,
             mode_selection_def=mode_selection_def,
-            language_backend=LanguageBackend.from_str(language_backend) if language_backend else None,
-            enable_web_dashboard=enable_web_dashboard,
-            open_web_dashboard=open_web_dashboard,
-            enable_gui_log_window=enable_gui_log_window,
             log_level=log_level,
             trace_lsp_communication=trace_lsp_communication,
             tool_timeout=tool_timeout,
@@ -397,7 +366,7 @@ class TopLevelCommands(AutoRegisteringGroup):
                 project_file,
             )
         log.info("Starting MCP server …")
-        server.run(transport=transport)
+        server.run(transport="stdio")
 
     @staticmethod
     @click.command(
@@ -427,7 +396,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         modes_selection_def: ModeSelectionDefinition | None = None
         if modes:
             modes_selection_def = ModeSelectionDefinition(default_modes=modes)
-        serena_config = SerenaConfig.from_config_file().with_headless_mode_overrides()
+        serena_config = SerenaConfig.from_config_file()
         agent = SerenaAgent(
             project=os.path.abspath(project) if project is not None else None,
             serena_config=serena_config,
@@ -491,21 +460,6 @@ class TopLevelCommands(AutoRegisteringGroup):
 
         server = ProjectServer(host=host, port=port)
         server.run()
-
-    @staticmethod
-    @click.command(
-        "dashboard-viewer",
-        help="Open the Serena dashboard viewer for a given URL.",
-        context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
-    )
-    @click.argument("url", type=str)
-    @click.option("--width", type=int, default=1400, show_default=True, help="Window width.")
-    @click.option("--height", type=int, default=900, show_default=True, help="Window height.")
-    def dashboard_viewer(url: str, width: int, height: int) -> None:
-        from serena.dashboard import SerenaDashboardViewer
-
-        viewer = SerenaDashboardViewer(url, width=width, height=height)
-        viewer.run()
 
 
 class ModeCommands(AutoRegisteringGroup):
@@ -814,7 +768,6 @@ class ProjectCommands(AutoRegisteringGroup):
             collected_exceptions: list[Exception] = []
             files_failed = []
             language_file_counts: dict[LanguageServerId, int] = collections.defaultdict(lambda: 0)
-            last_save_time = time.monotonic()
             for i, f in enumerate(tqdm(files, desc="Indexing")):
                 try:
                     ls = ls_mgr.get_language_server(f)
@@ -824,13 +777,8 @@ class ProjectCommands(AutoRegisteringGroup):
                     log.error(f"Failed to index {f}, continuing.")
                     collected_exceptions.append(e)
                     files_failed.append(f)
-                now = time.monotonic()
-                if now - last_save_time >= 30:
-                    ls_mgr.save_all_caches()
-                    last_save_time = now
             reported_language_file_counts = {k.value: v for k, v in language_file_counts.items()}
             click.echo(f"Indexed files per language: {dict_string(reported_language_file_counts, brackets=None)}")
-            ls_mgr.save_all_caches()
 
             if len(files_failed) > 0:
                 os.makedirs(os.path.dirname(log_file), exist_ok=True)
@@ -901,7 +849,6 @@ class ProjectCommands(AutoRegisteringGroup):
                     click.echo(f"Symbols in file '{file}':")
                     for symbol in symbols:
                         click.echo(f"  - {symbol['name']} at line {symbol['selectionRange']['start']['line']} of kind {symbol['kind']}")
-                ls.save_cache()
                 click.echo(f"Successfully indexed file '{file}', {len(symbols)} symbols saved to cache in {ls.cache_dir}.")
         finally:
             ls_mgr.stop_all()
@@ -932,8 +879,7 @@ class ProjectCommands(AutoRegisteringGroup):
 
         logging.configure(level=logging.INFO)
         project_path = os.path.abspath(project)
-        serena_config = SerenaConfig.from_config_file().with_headless_mode_overrides()
-        serena_config.language_backend = LanguageBackend.LSP
+        serena_config = SerenaConfig.from_config_file()
         proj = Project.load(project_path, serena_config=serena_config)
 
         # Create log file with timestamp
@@ -949,8 +895,7 @@ class ProjectCommands(AutoRegisteringGroup):
             log.info("Starting health check for project: %s", project_path)
 
             try:
-                # Create SerenaAgent with dashboard disabled
-                log.info("Creating SerenaAgent with disabled dashboard...")
+                log.info("Creating SerenaAgent ...")
 
                 agent = SerenaAgent(project=project_path, serena_config=serena_config)
                 log.info("SerenaAgent created successfully")
@@ -1100,7 +1045,7 @@ class ToolCommands(AutoRegisteringGroup):
 
         agent = SerenaAgent(
             project=None,
-            serena_config=SerenaConfig(log_level=logging.INFO).with_headless_mode_overrides(),
+            serena_config=SerenaConfig(log_level=logging.INFO),
             context=serena_context,
         )
         tool = agent.get_tool_by_name(tool_name)

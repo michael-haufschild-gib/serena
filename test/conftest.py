@@ -118,7 +118,7 @@ def start_default_ls_context(ls_id: LanguageServerId) -> Iterator[SolidLanguageS
 
 
 def create_default_serena_config():
-    return SerenaConfig(log_level=PYTEST_LOG_LEVEL).with_headless_mode_overrides()
+    return SerenaConfig(log_level=PYTEST_LOG_LEVEL)
 
 
 def _create_default_project(ls_id: LanguageServerId, repo_root_override: str | None = None) -> Project:

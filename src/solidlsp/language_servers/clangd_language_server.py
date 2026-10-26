@@ -224,33 +224,11 @@ class ClangdLanguageServer(SolidLanguageServer):
             """
             Setup runtime dependencies for ClangdLanguageServer and return the path to the executable.
             """
-            import shutil
-
             clangd_version = self._custom_settings.get("clangd_version", "19.1.2")
             default_version = clangd_version == "19.1.2"
 
             deps = RuntimeDependencyCollection(
                 [
-                    RuntimeDependency(
-                        id="Clangd",
-                        description="Clangd for Linux (x64)",
-                        url=f"https://github.com/clangd/clangd/releases/download/{clangd_version}/clangd-linux-{clangd_version}.zip",
-                        platform_id="linux-x64",
-                        archive_type="zip",
-                        binary_name=f"clangd_{clangd_version}/bin/clangd",
-                        sha256="7c09614eff857d590e4502ef516f035ff94cfb8b795de14ece5afbc53a206caf" if default_version else None,
-                        allowed_hosts=CLANGD_ALLOWED_HOSTS,
-                    ),
-                    RuntimeDependency(
-                        id="Clangd",
-                        description="Clangd for Windows (x64)",
-                        url=f"https://github.com/clangd/clangd/releases/download/{clangd_version}/clangd-windows-{clangd_version}.zip",
-                        platform_id="win-x64",
-                        archive_type="zip",
-                        binary_name=f"clangd_{clangd_version}/bin/clangd.exe",
-                        sha256="5b6ceb0f85d63fa0c2c9aab31c29bebd41dc11da1f160ef21bc2fea93270a20d" if default_version else None,
-                        allowed_hosts=CLANGD_ALLOWED_HOSTS,
-                    ),
                     RuntimeDependency(
                         id="Clangd",
                         description="Clangd for macOS (x64)",
@@ -276,36 +254,17 @@ class ClangdLanguageServer(SolidLanguageServer):
 
             clangd_ls_dir = os.path.join(self._ls_resources_dir, "clangd")
 
-            try:
-                dep = deps.get_single_dep_for_current_platform()
-            except RuntimeError:
-                dep = None
-
-            if dep is None:
-                # No prebuilt binary available, look for system-installed clangd
-                clangd_executable_path = shutil.which("clangd")
-                if not clangd_executable_path:
-                    raise FileNotFoundError(
-                        "Clangd is not installed on your system.\n"
-                        + "Please install clangd using your system package manager:\n"
-                        + "  Ubuntu/Debian: sudo apt-get install clangd\n"
-                        + "  Fedora/RHEL: sudo dnf install clang-tools-extra\n"
-                        + "  Arch Linux: sudo pacman -S clang\n"
-                        + "See https://clangd.llvm.org/installation for more details."
-                    )
-                log.info(f"Using system-installed clangd at {clangd_executable_path}")
-            else:
-                # Standard download and install for platforms with prebuilt binaries
-                clangd_executable_path = deps.binary_path(clangd_ls_dir)
-                if not os.path.exists(clangd_executable_path):
-                    log.info(f"Clangd executable not found at {clangd_executable_path}. Downloading from {dep.url}")
-                    _ = deps.install(clangd_ls_dir)
-                if not os.path.exists(clangd_executable_path):
-                    raise FileNotFoundError(
-                        f"Clangd executable not found at {clangd_executable_path}.\n"
-                        + "Make sure you have installed clangd. See https://clangd.llvm.org/installation"
-                    )
-                os.chmod(clangd_executable_path, 0o755)
+            dep = deps.get_single_dep_for_current_platform()
+            clangd_executable_path = deps.binary_path(clangd_ls_dir)
+            if not os.path.exists(clangd_executable_path):
+                log.info(f"Clangd executable not found at {clangd_executable_path}. Downloading from {dep.url}")
+                _ = deps.install(clangd_ls_dir)
+            if not os.path.exists(clangd_executable_path):
+                raise FileNotFoundError(
+                    f"Clangd executable not found at {clangd_executable_path}.\n"
+                    + "Make sure you have installed clangd. See https://clangd.llvm.org/installation"
+                )
+            os.chmod(clangd_executable_path, 0o755)
             return clangd_executable_path
 
         def _create_launch_command(self, core_path: str) -> list[str]:

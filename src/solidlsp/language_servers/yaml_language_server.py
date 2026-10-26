@@ -93,10 +93,6 @@ class YamlLanguageServer(SolidLanguageServer):
             yaml_ls_dir = os.path.join(self._ls_resources_dir, ls_dirname)
             yaml_executable_path = os.path.join(yaml_ls_dir, "node_modules", ".bin", "yaml-language-server")
 
-            # Handle Windows executable extension
-            if os.name == "nt":
-                yaml_executable_path += ".cmd"
-
             if not os.path.exists(yaml_executable_path):
                 log.info(f"YAML Language Server executable not found at {yaml_executable_path}. Installing...")
                 deps.install(yaml_ls_dir)

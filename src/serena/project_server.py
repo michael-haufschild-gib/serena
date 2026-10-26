@@ -8,7 +8,7 @@ from flask import Flask, request
 from pydantic import BaseModel
 from sensai.util.logging import LogTime
 
-from serena.config.serena_config import LanguageBackend, SerenaConfig
+from serena.config.serena_config import SerenaConfig
 from serena.constants import SerenaPorts
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ class QueryProjectRequest(BaseModel):
 class ProjectServer:
     """
     A lightweight Flask server that exposes a SerenaAgent's project querying
-    capabilities via HTTP, using the LSP language server backend for symbolic retrieval.
+    capabilities via HTTP, using language servers for symbolic retrieval.
 
     Projects are loaded on demand when a query is made for them, and cached in memory for subsequent queries.
 
@@ -55,10 +55,7 @@ class ProjectServer:
         if port is None:
             port = self.PORT
 
-        serena_config = SerenaConfig.from_config_file().with_headless_mode_overrides()
-        serena_config.language_backend = LanguageBackend.LSP
-
-        self._agent = SerenaAgent(serena_config=serena_config)
+        self._agent = SerenaAgent(serena_config=SerenaConfig.from_config_file())
         self._loaded_projects_by_root: dict[str, "Project"] = {}
         self._project_load_locks_by_root: dict[str, threading.Lock] = {}
         self._active_project_lock = threading.Lock()

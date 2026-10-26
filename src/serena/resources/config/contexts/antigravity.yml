@@ -11,7 +11,6 @@ prompt: |
 excluded_tools:
   - create_text_file
   - read_file
-  - execute_shell_command
   - find_file
   - list_dir
 

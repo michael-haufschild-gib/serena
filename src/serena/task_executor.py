@@ -2,8 +2,6 @@ import concurrent.futures
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future
-from dataclasses import dataclass
 from threading import Thread
 from typing import Generic, TypeVar
 
@@ -16,11 +14,9 @@ T = TypeVar("T")
 
 
 class TaskExecutor:
-    def __init__(self, name: str, task_completion_callback: Callable[[], None] | None = None):
+    def __init__(self, name: str):
         """
         :param name: the name of the task executor, used for logging purposes
-        :param task_completion_callback: an optional callback function that will be called after each task completion
-            (regardless of success, failure, or cancellation)
         """
         self._task_executor_lock = threading.Lock()
         self._task_executor_queue: list[TaskExecutor.Task] = []
@@ -28,8 +24,6 @@ class TaskExecutor:
         self._task_executor_thread.start()
         self._task_executor_task_index = 1
         self._task_executor_current_task: TaskExecutor.Task | None = None
-        self._task_executor_last_executed_task_info: TaskExecutor.TaskInfo | None = None
-        self._task_completion_callback = task_completion_callback
 
     class Task(ToStringMixin, Generic[T]):
         def __init__(self, function: Callable[[], T], name: str, logged: bool = True, timeout: float | None = None):
@@ -145,55 +139,6 @@ class TaskExecutor:
                 log.warning("Task %s did not complete within the timeout of %s seconds; continuing ...", task.name, task.timeout)
             with self._task_executor_lock:
                 self._task_executor_current_task = None
-                if task.logged:
-                    self._task_executor_last_executed_task_info = self.TaskInfo.from_task(task, is_running=False)
-
-            # call the task completion callback if provided
-            if self._task_completion_callback is not None:
-                try:
-                    self._task_completion_callback()
-                except Exception as e:
-                    log.error(f"Error in task completion callback after executing {task.name}: {e}", exc_info=e)
-
-    @dataclass
-    class TaskInfo:
-        name: str
-        is_running: bool
-        future: Future
-        """
-        future for accessing the task's result
-        """
-        task_id: int
-        """
-        unique identifier of the task
-        """
-        logged: bool
-
-        def finished_successfully(self) -> bool:
-            return self.future.done() and not self.future.cancelled() and self.future.exception() is None
-
-        @staticmethod
-        def from_task(task: "TaskExecutor.Task", is_running: bool) -> "TaskExecutor.TaskInfo":
-            return TaskExecutor.TaskInfo(name=task.name, is_running=is_running, future=task.future, task_id=id(task), logged=task.logged)
-
-        def cancel(self) -> None:
-            self.future.cancel()
-
-    def get_current_tasks(self) -> list[TaskInfo]:
-        """
-        Gets the list of tasks currently running or queued for execution.
-        The function returns a list of thread-safe TaskInfo objects (specifically created for the caller).
-
-        :return: the list of tasks in the execution order (running task first)
-        """
-        tasks = []
-        with self._task_executor_lock:
-            if self._task_executor_current_task is not None:
-                tasks.append(self.TaskInfo.from_task(self._task_executor_current_task, True))
-            for task in self._task_executor_queue:
-                if not task.is_done():
-                    tasks.append(self.TaskInfo.from_task(task, False))
-        return tasks
 
     def issue_task(self, task: Callable[[], T], name: str | None = None, logged: bool = True, timeout: float | None = None) -> Task[T]:
         """
@@ -232,12 +177,3 @@ class TaskExecutor:
         """
         task_obj = self.issue_task(task, name=name, logged=logged, timeout=timeout)
         return task_obj.result(timeout=timeout)
-
-    def get_last_executed_task(self) -> TaskInfo | None:
-        """
-        Gets information about the last executed task.
-
-        :return: TaskInfo of the last executed task, or None if no task has been executed yet.
-        """
-        with self._task_executor_lock:
-            return self._task_executor_last_executed_task_info

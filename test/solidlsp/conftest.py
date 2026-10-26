@@ -17,12 +17,6 @@ def read_repo_file(language_server: SolidLanguageServer, relative_path: str) -> 
     return abs_path.read_text()
 
 
-def is_diagnostics_test_file(relative_path: str) -> bool:
-    normalized_path = relative_path.replace("\\", "/")
-    filename = normalized_path.rsplit("/", 1)[-1].lower()
-    return filename.startswith(("diagnosticssample.", "diagnostics_sample."))
-
-
 def document_symbol_names(language_server: SolidLanguageServer, relative_path: str) -> list[str]:
     """All symbol names in a file's document-symbol tree, including children."""
     symbols = language_server.request_document_symbols(relative_path).get_all_symbols_and_roots()
@@ -88,9 +82,6 @@ def request_all_symbols(language_server: SolidLanguageServer) -> list[UnifiedSym
     result: list[UnifiedSymbolInformation] = []
 
     def visit(symbol: UnifiedSymbolInformation) -> None:
-        relative_path = symbol.get("location", {}).get("relativePath", "")
-        if relative_path and is_diagnostics_test_file(relative_path):
-            return
         result.append(symbol)
         for child in symbol.get("children", []):
             visit(child)

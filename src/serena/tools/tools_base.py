@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import cached_property
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Optional, Protocol, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, Self, TypeVar, cast
 
 from mcp import Implementation
 from mcp.server.fastmcp import Context
@@ -13,13 +13,11 @@ from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, func_metada
 from sensai.util import logging
 from sensai.util.string import dict_string
 
-from serena.config.serena_config import LanguageBackend
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
 from serena.prompt_factory import PromptFactory
 from serena.util.class_decorators import singleton
 from serena.util.inspection import iter_subclasses
-from serena.util.ls_diagnostics import DiagnosticsDiff, EditedFilePath, PublishedDiagnosticsSnapshot
 from solidlsp.ls_exceptions import SolidLSPException
 
 if TYPE_CHECKING:
@@ -53,29 +51,15 @@ class Component(ABC):
     def create_language_server_symbol_retriever(self) -> "LanguageServerSymbolRetriever":
         from serena.symbol import LanguageServerSymbolRetriever
 
-        assert self.agent.get_language_backend().is_lsp(), "Language server symbol retriever can only be created for LSP language backend"
         return LanguageServerSymbolRetriever(self.project)
 
     @property
     def project(self) -> Project:
         return self.agent.get_active_project_or_raise()
 
-    def create_code_editor(self) -> "CodeEditor":
-        from ..code_editor import JetBrainsCodeEditor
-
-        match self.agent.get_language_backend():
-            case LanguageBackend.LSP:
-                return self.create_ls_code_editor()
-            case LanguageBackend.JETBRAINS:
-                return JetBrainsCodeEditor(project=self.project)
-            case _:
-                raise ValueError
-
-    def create_ls_code_editor(self) -> "LanguageServerCodeEditor":
+    def create_code_editor(self) -> "LanguageServerCodeEditor":
         from ..code_editor import LanguageServerCodeEditor
 
-        if not self.agent.is_using_language_server():
-            raise Exception("Cannot create LanguageServerCodeEditor; agent is not in language server mode.")
         return LanguageServerCodeEditor(self.create_language_server_symbol_retriever())
 
 
@@ -396,9 +380,6 @@ class Tool(Component):
                     else:
                         raise
 
-                # record tool usage
-                self.agent.record_tool_usage(apply_kwargs, result, self)
-
             except ToolCallError:
                 raise
             except Exception as e:
@@ -408,13 +389,6 @@ class Tool(Component):
 
             if log_call:
                 log.info(f"Result: {result}")
-
-            try:
-                ls_manager = self.agent.get_language_server_manager()
-                if ls_manager is not None:
-                    ls_manager.save_all_caches()
-            except Exception as e:
-                log.error(f"Error saving language server cache: {e}")
 
             return result
 
@@ -461,62 +435,6 @@ class Tool(Component):
             except json.JSONDecodeError:
                 pass
         return self._to_json({"message": message, "response": response_obj})
-
-
-class EditingToolWithDiagnostics(Tool, ToolMarkerCanEdit):
-    """
-    Base class for editing tools that want to capture and report changes in LSP diagnostics before and after the edit.
-    """
-
-    ENABLE_DIAGNOSTICS: bool = False
-    """
-    Global flag to enable/disable diagnostics for LSP-based editing tools derived from this class.
-    The feature is currently disabled, because per-edit diagnostics are a questionable feature, since individual
-    edits often intentionally introduce diagnostics (e.g. function signature mismatches or even syntax errors) that 
-    are then resolved in subsequent edits.
-    """
-
-    DIAGNOSTICS_KEY = "diagnostics[warning-or-higher]"
-
-    class DiagnosticsContext:
-        def __init__(self, tool: "EditingToolWithDiagnostics", *edited_relative_paths: str) -> None:
-            self._tool = tool
-            self._is_diagnostics_enabled = tool.ENABLE_DIAGNOSTICS and tool.agent.is_using_language_server()
-            self._edited_files = [EditedFilePath(path, path) for path in edited_relative_paths]
-            self._before_edit_diagnostics_snapshot: PublishedDiagnosticsSnapshot | None = None
-            self._symbol_retriever: Optional["LanguageServerSymbolRetriever"] | None = None
-            if self._is_diagnostics_enabled:
-                self._symbol_retriever = tool.create_language_server_symbol_retriever()
-                self._before_edit_diagnostics_snapshot = PublishedDiagnosticsSnapshot(self._edited_files, self._symbol_retriever)
-
-        def __enter__(self) -> Self:
-            return self
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            pass
-
-        def format_result(
-            self,
-            base_result: str,
-        ) -> str:
-            if not self._is_diagnostics_enabled:
-                return base_result
-
-            if self._before_edit_diagnostics_snapshot is None:
-                return base_result
-
-            assert self._symbol_retriever is not None
-            diagnostics_diff = DiagnosticsDiff(self._before_edit_diagnostics_snapshot, self._edited_files, self._symbol_retriever)
-            grouped_diagnostics = diagnostics_diff.get_grouped_diagnostics().get_dict()
-
-            if not grouped_diagnostics:
-                return base_result
-            else:
-                result_dict = {
-                    "result": base_result,
-                    EditingToolWithDiagnostics.DIAGNOSTICS_KEY: grouped_diagnostics,
-                }
-                return self._tool._to_json(result_dict)
 
 
 class EditedFileContext:
@@ -588,6 +506,25 @@ class ToolRegistry:
         "think_about_whether_you_are_done",
         "switch_modes",
         "check_onboarding_performed",
+        # tools of removed features (still accepted in tool inclusion/exclusion lists of existing configurations)
+        "execute_shell_command",
+        "get_diagnostics_for_file",
+        "get_diagnostics_for_symbol",
+        "open_dashboard",
+        "serena_info",
+        "jet_brains_debug",
+        "jet_brains_find_declaration",
+        "jet_brains_find_implementations",
+        "jet_brains_find_referencing_symbols",
+        "jet_brains_find_symbol",
+        "jet_brains_get_symbols_overview",
+        "jet_brains_inline_symbol",
+        "jet_brains_list_inspections",
+        "jet_brains_move",
+        "jet_brains_rename",
+        "jet_brains_run_inspections",
+        "jet_brains_safe_delete",
+        "jet_brains_type_hierarchy",
     ]
 
     def __init__(self) -> None:

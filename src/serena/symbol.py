@@ -3,7 +3,6 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
-from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -12,12 +11,10 @@ from typing import Any, Generic, Literal, NotRequired, Self, TypedDict, TypeVar
 
 from sensai.util.string import ToStringMixin
 
-import serena.jetbrains.jetbrains_types as jb
-from solidlsp import SolidLanguageServer, ls_types
+from solidlsp import SolidLanguageServer
 from solidlsp.ls import LSPFileBuffer
 from solidlsp.ls import ReferenceInSymbol as LSPReferenceInSymbol
 from solidlsp.ls_types import Position, SymbolKind, UnifiedSymbolInformation
-from solidlsp.ls_utils import TextUtils
 
 from .ls_manager import LanguageServerManager
 from .project import Project
@@ -970,171 +967,6 @@ class LanguageServerSymbolRetriever:
             return None
         return LanguageServerSymbol(defining_symbol)
 
-    def get_file_diagnostics(
-        self,
-        relative_file_path: str,
-        start_line: int = 0,
-        end_line: int = -1,
-        min_severity: int = 4,
-    ) -> list[ls_types.Diagnostic]:
-        """
-        Get diagnostics for a file, optionally restricted to a line range and minimum severity.
-
-        :param relative_file_path: the relative path to the file.
-        :param start_line: the first 0-based line to include.
-        :param end_line: the last 0-based line to include. `-1` means until end of file.
-        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
-        :return: the diagnostics matching the requested constraints.
-        """
-        lang_server = self.get_language_server(relative_file_path)
-        return lang_server.request_text_document_diagnostics(
-            relative_file_path=relative_file_path,
-            start_line=start_line,
-            end_line=end_line,
-            min_severity=min_severity,
-        )
-
-    @staticmethod
-    def _symbol_identity(symbol: LanguageServerSymbol) -> tuple[str | None, int | None, int | None, str]:
-        return (symbol.relative_path, symbol.line, symbol.column, symbol.get_name_path())
-
-    @staticmethod
-    def _normalize_symbol_for_diagnostics(symbol: LanguageServerSymbol) -> LanguageServerSymbol:
-        current_symbol = symbol
-        while current_symbol.is_low_level():
-            parent_symbol = current_symbol.get_parent()
-            if parent_symbol is None:
-                break
-            current_symbol = parent_symbol
-        return current_symbol
-
-    def find_diagnostic_owner_symbol(self, relative_file_path: str, line: int, column: int) -> LanguageServerSymbol | None:
-        """
-        Find the symbol that should own a diagnostic at the given position.
-
-        This prefers the structural container of the diagnostic over low-level symbols such as
-        local variables, because diagnostics are typically more meaningful when grouped by the
-        surrounding function, method, class, or analogous construct.
-
-        :param relative_file_path: the relative path to the file containing the diagnostic.
-        :param line: the 0-based line of the diagnostic.
-        :param column: the 0-based column of the diagnostic.
-        :return: the owning symbol, or None if no symbol could be resolved.
-        """
-        lang_server = self.get_language_server(relative_file_path)
-        symbol_dict = lang_server.request_symbol_at_location(
-            relative_file_path=relative_file_path,
-            line=line,
-            column=column,
-        )
-        if symbol_dict is None:
-            return None
-        return self._normalize_symbol_for_diagnostics(LanguageServerSymbol(symbol_dict))
-
-    def _get_diagnostics_for_symbol(self, symbol: LanguageServerSymbol, min_severity: int) -> list[ls_types.Diagnostic]:
-        relative_path = symbol.relative_path
-        if relative_path is None:
-            return []
-
-        start_line, end_line = symbol.get_body_line_numbers()
-        if start_line is None:
-            if symbol.line is None:
-                return []
-            start_line = symbol.line
-        if end_line is None:
-            end_line = start_line
-
-        return self.get_file_diagnostics(
-            relative_file_path=relative_path,
-            start_line=start_line,
-            end_line=end_line,
-            min_severity=min_severity,
-        )
-
-    def get_symbol_diagnostics(
-        self,
-        name_path: str,
-        reference_file: str | None = None,
-        check_symbol_references: bool = False,
-        min_severity: int = 4,
-    ) -> dict[LanguageServerSymbol, list[ls_types.Diagnostic]]:
-        """
-        Get diagnostics for the specified symbol and, optionally, for all symbols that reference it.
-
-        :param name_path: the name path of the symbol to find. It should usually be unique.
-        :param reference_file: optional file path used to disambiguate the symbol search.
-        :param check_symbol_references: whether to additionally collect diagnostics for referencing symbols.
-        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
-        :return: a mapping from symbols to the diagnostics that overlap their body ranges.
-        """
-        symbol = self.find_unique(name_path, substring_matching=False, within_relative_path=reference_file or None)
-        return self.get_symbol_diagnostics_by_location(
-            symbol.location,
-            check_symbol_references=check_symbol_references,
-            min_severity=min_severity,
-        )
-
-    def get_symbol_diagnostics_by_location(
-        self,
-        symbol_location: LanguageServerSymbolLocation,
-        check_symbol_references: bool = False,
-        min_severity: int = 4,
-    ) -> dict[LanguageServerSymbol, list[ls_types.Diagnostic]]:
-        """
-        Get diagnostics for the symbol at the given location and, optionally, for all referencing symbols.
-
-        :param symbol_location: location of the symbol to inspect.
-        :param check_symbol_references: whether to additionally collect diagnostics for referencing symbols.
-        :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
-        :return: an ordered mapping from symbols to the diagnostics that overlap their body ranges.
-        """
-        if not symbol_location.has_position_in_file():
-            raise ValueError("Symbol location does not contain a valid position in a file")
-
-        symbol = self.find_by_location(symbol_location)
-        if symbol is None:
-            assert symbol_location.relative_path is not None
-            assert symbol_location.line is not None
-            assert symbol_location.column is not None
-            lang_server = self.get_language_server(symbol_location.relative_path)
-            symbol_dict = lang_server.request_symbol_at_location(
-                relative_file_path=symbol_location.relative_path,
-                line=symbol_location.line,
-                column=symbol_location.column,
-            )
-            if symbol_dict is None:
-                return {}
-            symbol = LanguageServerSymbol(symbol_dict)
-
-        symbols_to_check: "OrderedDict[tuple[str | None, int | None, int | None, str], LanguageServerSymbol]" = OrderedDict()
-        symbols_to_check[self._symbol_identity(symbol)] = symbol
-
-        if check_symbol_references:
-            reference_symbols = self.find_referencing_symbols_by_location(
-                symbol.location,
-                include_body=False,
-                exclude_kinds=[SymbolKind.File, SymbolKind.Module, SymbolKind.Package, SymbolKind.Namespace],
-            )
-            for reference in reference_symbols:
-                reference_relative_path = reference.get_relative_path()
-                normalized_reference_symbol = None
-                if reference_relative_path is not None:
-                    normalized_reference_symbol = self.find_diagnostic_owner_symbol(
-                        relative_file_path=reference_relative_path,
-                        line=reference.line,
-                        column=reference.character,
-                    )
-                if normalized_reference_symbol is None:
-                    normalized_reference_symbol = self._normalize_symbol_for_diagnostics(reference.symbol)
-                symbols_to_check.setdefault(self._symbol_identity(normalized_reference_symbol), normalized_reference_symbol)
-
-        result: dict[LanguageServerSymbol, list[ls_types.Diagnostic]] = {}
-        for current_symbol in symbols_to_check.values():
-            diagnostics = self._get_diagnostics_for_symbol(current_symbol, min_severity=min_severity)
-            if diagnostics:
-                result[current_symbol] = diagnostics
-        return result
-
     def get_symbol_overview(self, relative_path: str) -> dict[str, list[LanguageServerSymbol]]:
         """
         :param relative_path: the path of the file for which to get the symbol overview
@@ -1144,82 +976,6 @@ class LanguageServerSymbolRetriever:
         lang_server = self.get_language_server(relative_path)
         path_to_unified_symbols = lang_server.request_overview(relative_path)
         return {k: [LanguageServerSymbol(us) for us in v] for k, v in path_to_unified_symbols.items()}
-
-
-class JetBrainsSymbol(Symbol):
-    def __init__(self, symbol_dict: jb.SymbolDTO, project: Project) -> None:
-        """
-        :param symbol_dict: dictionary as returned by the JetBrains plugin client.
-        """
-        self._project = project
-        self._dict = symbol_dict
-        self._cached_file_content: str | None = None
-        self._cached_body_start_position: PositionInFile | None = None
-        self._cached_body_end_position: PositionInFile | None = None
-        self._cached_body = symbol_dict.get("body")
-
-    def _tostring_includes(self) -> list[str]:
-        return []
-
-    def _tostring_additional_entries(self) -> dict[str, Any]:
-        return dict(name_path=self.get_name_path(), relative_path=self.get_relative_path(), type=self._dict["type"])
-
-    def get_name_path(self) -> str:
-        return self._dict["name_path"]
-
-    def get_relative_path(self) -> str:
-        return self._dict["relative_path"]
-
-    def get_file_content(self) -> str:
-        if self._cached_file_content is None:
-            path = os.path.join(self._project.project_root, self.get_relative_path())
-            with open(path, encoding=self._project.project_config.encoding) as f:
-                self._cached_file_content = f.read()
-        return self._cached_file_content
-
-    def is_position_in_file_available(self) -> bool:
-        return "text_range" in self._dict
-
-    def get_body_start_position(self) -> PositionInFile | None:
-        if not self.is_position_in_file_available():
-            return None
-        if self._cached_body_start_position is None:
-            pos = self._dict["text_range"]["start_pos"]
-            line, col = pos["line"], pos["col"]
-            self._cached_body_start_position = PositionInFile(line=line, col=col)
-        return self._cached_body_start_position
-
-    def get_body_end_position(self) -> PositionInFile | None:
-        if not self.is_position_in_file_available():
-            return None
-        if self._cached_body_end_position is None:
-            pos = self._dict["text_range"]["end_pos"]
-            line, col = pos["line"], pos["col"]
-            self._cached_body_end_position = PositionInFile(line=line, col=col)
-        return self._cached_body_end_position
-
-    @property
-    def body(self) -> str | None:
-        if self._cached_body is not None:
-            return self._cached_body
-        start_position = self.get_body_start_position()
-        if start_position is None:
-            return None
-        end_position = self.get_body_end_position()
-        assert end_position is not None, "If start position is available, end position should also be available. Symbol: {self}"
-        file_content = self.get_file_content()
-        self._cached_body = TextUtils.get_text_in_range(
-            file_content, start_position.line, start_position.col, end_position.line, end_position.col
-        )
-        return self._cached_body
-
-    @property
-    def name(self) -> str:
-        return self._dict["name_path"].split("/")[-1]
-
-    def is_neighbouring_definition_separated_by_empty_line(self) -> bool:
-        # NOTE: Symbol types cannot really be differentiated, because types are not handled in a language-agnostic way.
-        return False
 
 
 TSymbolDict = TypeVar("TSymbolDict")
@@ -1350,32 +1106,3 @@ class LanguageServerSymbolDictGrouper(SymbolDictGrouper[LanguageServerSymbol.Out
         collapse_singleton: bool = False,
     ) -> None:
         super().__init__(LanguageServerSymbol.OutputDict, "children", group_keys, group_children_keys, collapse_singleton)
-
-
-class JetBrainsSymbolDictGrouper(SymbolDictGrouper[jb.SymbolDTO]):
-    def __init__(
-        self,
-        group_keys: list[jb.SymbolDTOKey],
-        group_children_keys: list[jb.SymbolDTOKey],
-        collapse_singleton: bool = False,
-        map_name_path_to_name: bool = False,
-    ) -> None:
-        """
-        :param group_keys: keys to group main symbols by
-        :param group_children_keys: keys to group child symbols by
-        :param collapse_singleton: whether to collapse singleton symbol dictionaries
-        :param map_name_path_to_name: whether to transform the "name_path" key of child symbols to the bare "name"
-        """
-        super().__init__(jb.SymbolDTO, "children", group_keys, group_children_keys, collapse_singleton)
-        self._map_name_path_to_name = map_name_path_to_name
-
-    def _transform_item(self, item: dict, is_child: bool) -> dict:
-        if self._map_name_path_to_name and is_child:
-            # {"name_path: "Class/myMethod"} -> {"name: "myMethod"}
-            new_item = dict(item)
-            if "name_path" in item:
-                name_path = new_item.pop("name_path")
-                new_item["name"] = name_path.split("/")[-1]
-            return super()._transform_item(new_item, is_child)
-        else:
-            return super()._transform_item(item, is_child)

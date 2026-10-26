@@ -18,15 +18,11 @@ WHY these tests matter:
 """
 
 import os
-import pathlib
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 # Platform detection for skipping platform-specific tests
-IS_WINDOWS = sys.platform == "win32"
-IS_UNIX = sys.platform != "win32"
 
 
 class TestRustAnalyzerDetection:
@@ -102,16 +98,8 @@ class TestRustAnalyzerDetection:
         """
         from solidlsp.language_servers.rust_analyzer import RustAnalyzer
 
-        # Use platform-appropriate paths and binary names
-        home = pathlib.Path.home()
-        if IS_WINDOWS:
-            binary_name = "rust-analyzer.exe"
-            broken_proxy_path = str(home / "AppData" / "Local" / "Microsoft" / "WindowsApps" / binary_name)
-            cargo_path = str(home / ".cargo" / "bin" / binary_name)
-        else:
-            binary_name = "rust-analyzer"
-            broken_proxy_path = "/usr/bin/rust-analyzer"
-            cargo_path = os.path.expanduser("~/.cargo/bin/rust-analyzer")
+        broken_proxy_path = "/usr/bin/rust-analyzer"
+        cargo_path = os.path.expanduser("~/.cargo/bin/rust-analyzer")
 
         def mock_isfile(path):
             return path in [broken_proxy_path, cargo_path]
@@ -132,7 +120,6 @@ class TestRustAnalyzerDetection:
         assert result == cargo_path
 
     @pytest.mark.rust
-    @pytest.mark.skipif(IS_WINDOWS, reason="Homebrew paths only apply to macOS/Linux")
     def test_detect_from_homebrew_apple_silicon_path(self):
         """
         GIVEN rustup is NOT available
@@ -161,7 +148,6 @@ class TestRustAnalyzerDetection:
         assert result == "/opt/homebrew/bin/rust-analyzer"
 
     @pytest.mark.rust
-    @pytest.mark.skipif(IS_WINDOWS, reason="Homebrew paths only apply to macOS/Linux")
     def test_detect_from_homebrew_intel_path(self):
         """
         GIVEN rustup is NOT available
@@ -190,7 +176,6 @@ class TestRustAnalyzerDetection:
         assert result == "/usr/local/bin/rust-analyzer"
 
     @pytest.mark.rust
-    @pytest.mark.skipif(IS_WINDOWS, reason="Unix cargo path - Windows has separate test")
     def test_detect_from_cargo_install_path(self):
         """
         GIVEN rustup is NOT available
@@ -244,7 +229,6 @@ class TestRustAnalyzerDetection:
         assert "rustup" in result or ".rustup" in result
 
     @pytest.mark.rust
-    @pytest.mark.skipif(IS_WINDOWS, reason="Unix error messages - Windows has separate test")
     def test_error_message_lists_searched_locations_when_not_found(self):
         """
         GIVEN rust-analyzer is NOT installed anywhere
@@ -298,7 +282,6 @@ class TestRustAnalyzerDetection:
         assert result == rustup_path
 
     @pytest.mark.rust
-    @pytest.mark.skipif(IS_WINDOWS, reason="Uses Unix paths - Windows has different behavior")
     def test_skips_nonexecutable_files(self):
         """
         GIVEN a file exists at a detection path but is NOT executable
@@ -334,104 +317,6 @@ class TestRustAnalyzerDetection:
 
         # Should skip non-executable Homebrew and use cargo
         assert result == os.path.expanduser("~/.cargo/bin/rust-analyzer")
-
-    @pytest.mark.rust
-    def test_detect_from_scoop_shims_path_on_windows(self):
-        """
-        GIVEN rustup is NOT available
-        AND rust-analyzer is installed via Scoop on Windows
-        AND it is NOT in PATH
-        WHEN _ensure_rust_analyzer_installed is called
-        THEN it should find ~/scoop/shims/rust-analyzer.exe
-
-        WHY: Scoop is a popular package manager for Windows.
-        The binary lands in ~/scoop/shims which may not be in PATH.
-        """
-        from solidlsp.language_servers.rust_analyzer import RustAnalyzer
-
-        home = pathlib.Path.home()
-        scoop_path = str(home / "scoop" / "shims" / "rust-analyzer.exe")
-
-        def mock_isfile(path):
-            return path == scoop_path
-
-        def mock_access(path, mode):
-            return path == scoop_path
-
-        with (
-            patch.object(RustAnalyzer.DependencyProvider, "_get_rust_analyzer_via_rustup", return_value=None),
-            patch.object(RustAnalyzer.DependencyProvider, "_get_rustup_version", return_value=None),
-        ):
-            with patch("platform.system", return_value="Windows"):
-                with patch("shutil.which", return_value=None):
-                    with patch("os.path.isfile", side_effect=mock_isfile):
-                        with patch("os.access", side_effect=mock_access):
-                            result = RustAnalyzer.DependencyProvider._ensure_rust_analyzer_installed()
-
-        assert result == scoop_path
-
-    @pytest.mark.rust
-    def test_detect_from_cargo_path_on_windows(self):
-        """
-        GIVEN rustup is NOT available
-        AND rust-analyzer is installed via cargo on Windows
-        AND it is NOT in PATH or Scoop locations
-        WHEN _ensure_rust_analyzer_installed is called
-        THEN it should find ~/.cargo/bin/rust-analyzer.exe
-
-        WHY: `cargo install rust-analyzer` works on Windows.
-        The binary has .exe extension and lands in ~/.cargo/bin.
-        """
-        from solidlsp.language_servers.rust_analyzer import RustAnalyzer
-
-        home = pathlib.Path.home()
-        cargo_path = str(home / ".cargo" / "bin" / "rust-analyzer.exe")
-
-        def mock_isfile(path):
-            return path == cargo_path
-
-        def mock_access(path, mode):
-            return path == cargo_path
-
-        with (
-            patch.object(RustAnalyzer.DependencyProvider, "_get_rust_analyzer_via_rustup", return_value=None),
-            patch.object(RustAnalyzer.DependencyProvider, "_get_rustup_version", return_value=None),
-        ):
-            with patch("platform.system", return_value="Windows"):
-                with patch("shutil.which", return_value=None):
-                    with patch("os.path.isfile", side_effect=mock_isfile):
-                        with patch("os.access", side_effect=mock_access):
-                            result = RustAnalyzer.DependencyProvider._ensure_rust_analyzer_installed()
-
-        assert result == cargo_path
-
-    @pytest.mark.rust
-    def test_windows_error_message_suggests_windows_package_managers(self):
-        """
-        GIVEN rust-analyzer is NOT installed anywhere on Windows
-        AND rustup is NOT installed
-        WHEN _ensure_rust_analyzer_installed is called
-        THEN it should raise RuntimeError with Windows-specific installation suggestions
-
-        WHY: Windows users need Windows-specific package manager suggestions
-        (Scoop, Chocolatey) instead of Homebrew/apt.
-        """
-        from solidlsp.language_servers.rust_analyzer import RustAnalyzer
-
-        with patch("platform.system", return_value="Windows"):
-            with patch("shutil.which", return_value=None):
-                with patch("os.path.isfile", return_value=False):
-                    with patch.object(RustAnalyzer.DependencyProvider, "_get_rust_analyzer_via_rustup", return_value=None):
-                        with patch.object(RustAnalyzer.DependencyProvider, "_get_rustup_version", return_value=None):
-                            with pytest.raises(RuntimeError) as exc_info:
-                                RustAnalyzer.DependencyProvider._ensure_rust_analyzer_installed()
-
-        error_message = str(exc_info.value)
-        # Error should suggest Windows-specific package managers
-        assert "Scoop" in error_message or "scoop" in error_message
-        assert "Chocolatey" in error_message or "choco" in error_message
-        # Should NOT suggest Homebrew on Windows
-        assert "Homebrew" not in error_message and "brew" not in error_message
 
     @pytest.mark.rust
     def test_auto_install_via_rustup_when_not_found(self):

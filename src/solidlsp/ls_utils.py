@@ -8,7 +8,6 @@ import logging
 import os
 import platform
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import uuid
@@ -24,7 +23,6 @@ import requests
 
 from solidlsp.ls_exceptions import InvalidTextLocationError, SolidLSPException
 from solidlsp.ls_types import UnifiedSymbolInformation
-from solidlsp.util.subprocess_util import subprocess_run
 
 log = logging.getLogger(__name__)
 
@@ -352,7 +350,7 @@ class PathUtils:
     @staticmethod
     def uri_to_path(uri: str) -> str:
         """
-        Converts a URI to a file path. Works on both Linux and Windows.
+        Converts a URI to a file path.
 
         This method was obtained from https://stackoverflow.com/a/61922504
         """
@@ -646,29 +644,12 @@ class FileUtils:
 
 
 class PlatformId(str, Enum):
-    WIN_x86 = "win-x86"
-    WIN_x64 = "win-x64"
-    WIN_arm64 = "win-arm64"
-    OSX = "osx"
+    """
+    Identifier of a macOS platform, used to select platform-specific language server downloads.
+    """
+
     OSX_x64 = "osx-x64"
     OSX_arm64 = "osx-arm64"
-    LINUX_x86 = "linux-x86"
-    LINUX_x64 = "linux-x64"
-    LINUX_arm64 = "linux-arm64"
-    LINUX_MUSL_x64 = "linux-musl-x64"
-    LINUX_MUSL_arm64 = "linux-musl-arm64"
-
-    def is_windows(self) -> bool:
-        return self.value.startswith("win")
-
-
-class DotnetVersion(str, Enum):
-    V4 = "4"
-    V6 = "6"
-    V7 = "7"
-    V8 = "8"
-    V9 = "9"
-    VMONO = "mono"
 
 
 class PlatformUtils:
@@ -676,116 +657,20 @@ class PlatformUtils:
     This class provides utilities for platform detection and identification.
     """
 
+    _MACHINE_TO_PLATFORM_ID = {"arm64": PlatformId.OSX_arm64, "x86_64": PlatformId.OSX_x64}
+
     @classmethod
     def get_platform_id(cls) -> PlatformId:
         """
-        Returns the platform id for the current system
+        :return: the platform id of the current system
+        :raises SolidLSPException: if the system is not a supported macOS machine
         """
         system = platform.system()
         machine = platform.machine()
-        bitness = platform.architecture()[0]
-        if system == "Windows" and machine == "":
-            machine = cls._determine_windows_machine_type()
-        system_map = {"Windows": "win", "Darwin": "osx", "Linux": "linux"}
-        machine_map = {
-            "AMD64": "x64",
-            "x86_64": "x64",
-            "i386": "x86",
-            "i686": "x86",
-            "aarch64": "arm64",
-            "arm64": "arm64",
-            "ARM64": "arm64",
-        }
-        if system in system_map and machine in machine_map:
-            platform_id = system_map[system] + "-" + machine_map[machine]
-            if system == "Linux" and bitness == "64bit":
-                libc = platform.libc_ver()[0]
-                if libc != "glibc":
-                    # Format: linux-musl-arch (e.g., linux-musl-arm64)
-                    platform_id = f"{system_map[system]}-{libc}-{machine_map[machine]}"
-            return PlatformId(platform_id)
-        else:
-            raise SolidLSPException(f"Unknown platform: {system=}, {machine=}, {bitness=}")
-
-    @staticmethod
-    def _determine_windows_machine_type() -> str:
-        import ctypes
-        from ctypes import wintypes
-
-        class SYSTEM_INFO(ctypes.Structure):
-            class _U(ctypes.Union):
-                class _S(ctypes.Structure):
-                    _fields_ = [("wProcessorArchitecture", wintypes.WORD), ("wReserved", wintypes.WORD)]
-
-                _fields_ = [("dwOemId", wintypes.DWORD), ("s", _S)]
-                _anonymous_ = ("s",)
-
-            _fields_ = [
-                ("u", _U),
-                ("dwPageSize", wintypes.DWORD),
-                ("lpMinimumApplicationAddress", wintypes.LPVOID),
-                ("lpMaximumApplicationAddress", wintypes.LPVOID),
-                ("dwActiveProcessorMask", wintypes.LPVOID),
-                ("dwNumberOfProcessors", wintypes.DWORD),
-                ("dwProcessorType", wintypes.DWORD),
-                ("dwAllocationGranularity", wintypes.DWORD),
-                ("wProcessorLevel", wintypes.WORD),
-                ("wProcessorRevision", wintypes.WORD),
-            ]
-            _anonymous_ = ("u",)
-
-        sys_info = SYSTEM_INFO()
-        ctypes.windll.kernel32.GetNativeSystemInfo(ctypes.byref(sys_info))
-
-        arch_map = {
-            9: "AMD64",
-            5: "ARM",
-            12: "arm64",
-            6: "Intel Itanium-based",
-            0: "i386",
-        }
-
-        return arch_map.get(sys_info.wProcessorArchitecture, f"Unknown ({sys_info.wProcessorArchitecture})")
-
-    @staticmethod
-    def get_dotnet_version() -> DotnetVersion:
-        """
-        Returns the dotnet version for the current system
-        """
-        try:
-            result = subprocess_run(["dotnet", "--list-runtimes"], capture_output=True, check=True)
-            available_version_cmd_output = []
-            for line in result.stdout.split("\n"):
-                if line.startswith("Microsoft.NETCore.App"):
-                    version_cmd_output = line.split(" ")[1]
-                    available_version_cmd_output.append(version_cmd_output)
-
-            if not available_version_cmd_output:
-                raise SolidLSPException("dotnet not found on the system")
-
-            # Check for supported versions in order of preference (latest first)
-            for version_cmd_output in available_version_cmd_output:
-                if version_cmd_output.startswith("9"):
-                    return DotnetVersion.V9
-                if version_cmd_output.startswith("8"):
-                    return DotnetVersion.V8
-                if version_cmd_output.startswith("7"):
-                    return DotnetVersion.V7
-                if version_cmd_output.startswith("6"):
-                    return DotnetVersion.V6
-                if version_cmd_output.startswith("4"):
-                    return DotnetVersion.V4
-
-            # If no supported version found, raise exception with all available versions
-            raise SolidLSPException(
-                f"No supported dotnet version found. Available versions: {', '.join(available_version_cmd_output)}. Supported versions: 4, 6, 7, 8, 9"
-            )
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            try:
-                result = subprocess_run(["mono", "--version"], capture_output=True, check=True)
-                return DotnetVersion.VMONO
-            except (FileNotFoundError, subprocess.CalledProcessError):
-                raise SolidLSPException("dotnet or mono not found on the system")
+        platform_id = cls._MACHINE_TO_PLATFORM_ID.get(machine) if system == "Darwin" else None
+        if platform_id is None:
+            raise SolidLSPException(f"Unsupported platform (only macOS is supported): {system=}, {machine=}")
+        return platform_id
 
 
 class SymbolUtils:

@@ -3,13 +3,16 @@ Provides Python specific instantiation of the LanguageServer class. Contains var
 """
 
 import logging
+import os
 import re
+import shutil
 import threading
 from typing import cast
 
 from overrides import override
 
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderUvx, SolidLanguageServer
+from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
+from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.settings import SolidLSPSettings
 
@@ -44,15 +47,40 @@ class PyrightServer(SolidLanguageServer):
         self.found_source_files = False
 
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
-        return LanguageServerDependencyProviderUvx(
-            self._custom_settings,
-            self._ls_resources_dir,
-            package="pyright",
-            entrypoint="pyright-langserver",
-            default_version=PYRIGHT_VERSION,
-            version_setting_key="pyright_version",
-            extra_args=("--stdio",),
-        )
+        return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
+
+    class DependencyProvider(LanguageServerDependencyProviderSinglePath):
+        """
+        Installs the pyright npm package into Serena's resources directory and runs its language server
+        directly with node (rather than through the PyPI wrapper, which adds a uv and a Python process).
+        """
+
+        def _get_or_install_core_dependency(self) -> str:
+            if shutil.which("node") is None or shutil.which("npm") is None:
+                raise FileNotFoundError("node and npm are required for the Python language server (pyright); install Node.js.")
+            version = self._custom_settings.get("pyright_version", PYRIGHT_VERSION)
+            install_dir = os.path.join(self._ls_resources_dir, f"pyright-{version}")
+            executable_path = os.path.join(install_dir, "node_modules", ".bin", "pyright-langserver")
+
+            if not os.path.exists(executable_path):
+                log.info(f"pyright {version} not found at {executable_path}. Installing...")
+                deps = RuntimeDependencyCollection(
+                    [
+                        RuntimeDependency(
+                            id="pyright",
+                            description="pyright npm package",
+                            command=build_npm_install_command("pyright", version, self._custom_settings.get("npm_registry")),
+                            platform_id="any",
+                        )
+                    ]
+                )
+                deps.install(install_dir)
+            if not os.path.exists(executable_path):
+                raise FileNotFoundError(f"pyright-langserver not found at {executable_path} after installation.")
+            return executable_path
+
+        def _create_launch_command(self, core_path: str) -> list[str]:
+            return [core_path, "--stdio"]
 
     @override
     def is_ignored_dirname(self, dirname: str) -> bool:
@@ -74,6 +102,7 @@ class PyrightServer(SolidLanguageServer):
             "capabilities": {
                 "workspace": {
                     "workspaceEdit": {"documentChanges": True},
+                    "configuration": True,
                     "didChangeConfiguration": {"dynamicRegistration": True},
                     "didChangeWatchedFiles": {"dynamicRegistration": True},
                     "symbol": {
@@ -200,7 +229,14 @@ class PyrightServer(SolidLanguageServer):
                 if not self.found_source_files:
                     self.analysis_complete.set()
 
+        def configuration_handler(params: dict) -> list:
+            # Serena never reports diagnostics, so pyright's type checking would be wasted work;
+            # type evaluation for hover/definitions/references happens regardless of this setting
+            analysis_settings = {"typeCheckingMode": "off", "diagnosticMode": "openFilesOnly"}
+            return [analysis_settings if item.get("section") == "python.analysis" else {} for item in params.get("items", [])]
+
         # Set up notification handlers
+        self.server.on_request("workspace/configuration", configuration_handler)
         self.server.on_request("client/registerCapability", do_nothing)
         self.server.on_notification("language/status", do_nothing)
         self.server.on_notification("window/logMessage", window_log_message)

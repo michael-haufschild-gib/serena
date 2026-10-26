@@ -22,10 +22,7 @@ class HookClient(Enum):
     """The client application that triggered the hook."""
 
     CLAUDE_CODE = "claude-code"
-    CODEBUDDY = "codebuddy"
-    VSCODE = "vscode"
     CODEX = "codex"
-    GROK = "grok"
 
 
 class Hook(ABC):
@@ -53,14 +50,11 @@ class PreToolUseHook(Hook, ABC):
         (
             "pattern",
             "read",
-            "diagnostics",
             "memory",
             "onboarding",
             "config",
             "list_file",
             "find_file",
-            "shell",
-            "dashboard",
             "restart_language_server",
         )
     )
@@ -73,9 +67,7 @@ class PreToolUseHook(Hook, ABC):
             raise ValueError("Tool name is required in the hook input data")
         self._tool_name = _tool_name
         raw_tool_input = self._input_data.get("tool_input") or self._input_data.get("toolInput")
-        # TODO: some agents, like copilot CLI, can send a string as value for raw_tool_input
-        #  Example: "tool_input":"*** Begin Patch\n*** Add File: /Users/acbdef/.copilot/session-state/08a961db-02f0-4c7c-b783-1e9818290292/files/hook-tool-test-3.txt\n+third edit tool test\n*** End Patch\n"
-        #  We currently don't parse such tool input and hence don't react to it in hooks
+        # tool input that is not a JSON object (e.g. a raw patch string) is not parsed and hence not reacted to
         self._tool_input: dict | None = raw_tool_input if isinstance(raw_tool_input, dict) else None
 
         # only relevant in claude code at the moment, (not all events include this field; default to empty string)
@@ -89,12 +81,6 @@ class PreToolUseHook(Hook, ABC):
         additional_context: str = ""
 
         def to_json_string(self, client: HookClient) -> str:
-            if client == HookClient.GROK:
-                grok_output: dict[str, str] = {"decision": self.permission_decision}
-                if self.permission_decision == "deny":
-                    grok_output["reason"] = self.permission_decision_reason
-                return json.dumps(grok_output)
-
             hook_output = {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -274,13 +260,13 @@ class PreToolUseRemindAboutSymbolicToolsHook(PreToolUseHook):
     #: are caught alongside ``read_file``, while ``write_file``/``edit_file`` are not.
     _READ_FILE_VERB_SUBSTRINGS: frozenset[str] = frozenset(("read", "view", "open", "show"))
 
-    #: Shell commands that perform grep-like search; used to classify Codex/Grok
+    #: Shell commands that perform grep-like search; used to classify Codex
     #: shell-command tool calls whose ``cmd`` or ``command`` field starts with one of these.
     _GREP_SHELL_COMMANDS: frozenset[str] = frozenset(("grep", "rg", "ag", "ack", "fgrep", "egrep", "search_for_pattern"))
 
-    #: Shell commands that perform file-read operations; used to classify Codex/Grok
+    #: Shell commands that perform file-read operations; used to classify Codex
     #: shell-command tool calls whose ``cmd`` or ``command`` field starts with one of these.
-    _READ_SHELL_COMMANDS: frozenset[str] = frozenset(("cat", "head", "tail", "sed", "less", "more", "bat", "get-content", "gc"))
+    _READ_SHELL_COMMANDS: frozenset[str] = frozenset(("cat", "head", "tail", "sed", "less", "more", "bat"))
 
     #: file suffixes for source-like files where symbolic tools are usually more
     #: appropriate than repeated raw reads. Lowercase and extension-only.
@@ -353,7 +339,7 @@ class PreToolUseRemindAboutSymbolicToolsHook(PreToolUseHook):
         super().__init__(client)
         self._tool_call_counter = self.ToolUseCounter.load(self)
 
-        # extract a shell ``cmd``/``command`` field (Codex/Grok shell-command-style payloads):
+        # extract a shell ``cmd``/``command`` field (Codex shell-command-style payloads):
         # split into command name (basename, lowercased) and the remaining argument string
         # so both bare names (``rg``) and path-prefixed invocations (``/usr/bin/grep``) are
         # normalised the same way. Stays ``None`` when no shell command is present.
@@ -380,23 +366,19 @@ class PreToolUseRemindAboutSymbolicToolsHook(PreToolUseHook):
             self._file_path = str(file_path).strip() or None
 
     def is_grep_call(self) -> bool:
-        if self._client in (HookClient.CLAUDE_CODE, HookClient.CODEBUDDY):
+        if self._client == HookClient.CLAUDE_CODE:
             return self._tool_name == "grep" or "search_for_pattern" in self._tool_name
-        if self._client == HookClient.GROK:
-            return self._tool_name == "grep" or (self._is_shell_command_call() and self._command_name in self._GREP_SHELL_COMMANDS)
         if self._client == HookClient.CODEX and self._is_shell_command_call():
             return self._command_name in self._GREP_SHELL_COMMANDS
-        # heuristic for other clients
+        # heuristic for the remaining (non-shell) Codex tool calls
         return "grep" in self._tool_name
 
     def is_read_call(self) -> bool:
-        if self._client in (HookClient.CLAUDE_CODE, HookClient.CODEBUDDY):
+        if self._client == HookClient.CLAUDE_CODE:
             return self._tool_name == "read" or "read_file" in self._tool_name
-        if self._client == HookClient.GROK:
-            return self._tool_name == "read_file" or (self._is_shell_command_call() and self._command_name in self._READ_SHELL_COMMANDS)
         if self._client == HookClient.CODEX and self._is_shell_command_call():
             return self._command_name in self._READ_SHELL_COMMANDS
-        # heuristic for other clients
+        # heuristic for the remaining (non-shell) Codex tool calls
         name = self._tool_name
         if "file" not in name:
             return False
@@ -418,7 +400,7 @@ class PreToolUseRemindAboutSymbolicToolsHook(PreToolUseHook):
         if self._file_path is not None:
             return self._is_code_file_path(self._file_path)
 
-        if self._client in (HookClient.CODEX, HookClient.GROK) and self._command_args_str is not None:
+        if self._client == HookClient.CODEX and self._command_args_str is not None:
             return any(self._is_code_file_path(argument) for argument in self._iter_shell_path_arguments())
 
         return True

@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import pathlib
-import platform
 import re
 import shutil
 import subprocess
@@ -57,11 +56,7 @@ class VsixResourcePaths:
 # Mapping from Serena's platform identifiers to upstream JDTLS config_<platform> directory names
 JDTLS_CONFIG_DIR_BY_PLATFORM = {
     "osx-arm64": "config_mac_arm",
-    "darwin-arm64": "config_mac_arm",
     "osx-x64": "config_mac",
-    "linux-arm64": "config_linux_arm",
-    "linux-x64": "config_linux",
-    "win-x64": "config_win",
 }
 
 # Minimum supported JDK version for running JDTLS itself
@@ -171,10 +166,8 @@ class EclipseJDTLS(SolidLanguageServer):
     ```yaml
     ls_specific_settings:
       java:
-        maven_user_settings: "/home/user/.m2/settings.xml"  # Unix/Linux/Mac
-        # maven_user_settings: 'C:\\Users\\YourName\\.m2\\settings.xml'  # Windows (use single quotes!)
-        gradle_user_home: "/home/user/.gradle"  # Unix/Linux/Mac
-        # gradle_user_home: 'C:\\Users\\YourName\\.gradle'  # Windows (use single quotes!)
+        maven_user_settings: "/Users/you/.m2/settings.xml"
+        gradle_user_home: "/Users/you/.gradle"
         gradle_wrapper_enabled: true  # set to true for projects with custom plugins/repositories
         gradle_java_home: "/path/to/jdk"  # set to override Gradle's JDK
         use_system_java_home: true  # set to true to use system JAVA_HOME for JDTLS and Gradle fallback
@@ -311,9 +304,6 @@ class EclipseJDTLS(SolidLanguageServer):
             urls = {
                 "osx-arm64": f"https://github.com/redhat-developer/vscode-java/releases/download/{vscode_java_tag}/java-darwin-arm64-{vscode_java_version}.vsix",
                 "osx-x64": f"https://github.com/redhat-developer/vscode-java/releases/download/{vscode_java_tag}/java-darwin-x64-{vscode_java_version}.vsix",
-                "linux-arm64": f"https://github.com/redhat-developer/vscode-java/releases/download/{vscode_java_tag}/java-linux-arm64-{vscode_java_version}.vsix",
-                "linux-x64": f"https://github.com/redhat-developer/vscode-java/releases/download/{vscode_java_tag}/java-linux-x64-{vscode_java_version}.vsix",
-                "win-x64": f"https://github.com/redhat-developer/vscode-java/releases/download/{vscode_java_tag}/java-win32-x64-{vscode_java_version}.vsix",
             }
             deps = {}
             for platform_key, url in urls.items():
@@ -402,27 +392,6 @@ class EclipseJDTLS(SolidLanguageServer):
                     lombok_jar_path=f"extension/lombok/{vsix_paths.lombok_jar_basename}",
                     jdtls_launcher_jar_path=f"extension/server/plugins/{vsix_paths.equinox_launcher_basename}",
                     jdtls_readonly_config_path="extension/server/config_mac",
-                ),
-                "linux-arm64": VSCodeJavaConfig(
-                    jre_home_path=f"extension/jre/{vsix_paths.jre_version}-linux-aarch64",
-                    jre_path=f"extension/jre/{vsix_paths.jre_version}-linux-aarch64/bin/java",
-                    lombok_jar_path=f"extension/lombok/{vsix_paths.lombok_jar_basename}",
-                    jdtls_launcher_jar_path=f"extension/server/plugins/{vsix_paths.equinox_launcher_basename}",
-                    jdtls_readonly_config_path="extension/server/config_linux_arm",
-                ),
-                "linux-x64": VSCodeJavaConfig(
-                    jre_home_path=f"extension/jre/{vsix_paths.jre_version}-linux-x86_64",
-                    jre_path=f"extension/jre/{vsix_paths.jre_version}-linux-x86_64/bin/java",
-                    lombok_jar_path=f"extension/lombok/{vsix_paths.lombok_jar_basename}",
-                    jdtls_launcher_jar_path=f"extension/server/plugins/{vsix_paths.equinox_launcher_basename}",
-                    jdtls_readonly_config_path="extension/server/config_linux",
-                ),
-                "win-x64": VSCodeJavaConfig(
-                    jre_home_path=f"extension/jre/{vsix_paths.jre_version}-win32-x86_64",
-                    jre_path=f"extension/jre/{vsix_paths.jre_version}-win32-x86_64/bin/java.exe",
-                    lombok_jar_path=f"extension/lombok/{vsix_paths.lombok_jar_basename}",
-                    jdtls_launcher_jar_path=f"extension/server/plugins/{vsix_paths.equinox_launcher_basename}",
-                    jdtls_readonly_config_path="extension/server/config_win",
                 ),
             }
 
@@ -600,7 +569,7 @@ class EclipseJDTLS(SolidLanguageServer):
             :return: (jdk_home_directory, java_executable_path)
             """
             # locate a java executable to interrogate
-            java_exe_name = "java.exe" if platform.system() == "Windows" else "java"
+            java_exe_name = "java"
             java_exe: str | None = None
             source: str
 
@@ -1213,11 +1182,11 @@ class EclipseJDTLS(SolidLanguageServer):
                         },
                         # Set updateSnapshots to False to improve performance and avoid unnecessary network calls
                         # Snapshots will only be updated when explicitly requested by the user
-                        "maven": {"downloadSources": True, "updateSnapshots": False},
-                        "eclipse": {"downloadSources": True},
+                        "maven": {"downloadSources": False, "updateSnapshots": False},
+                        "eclipse": {"downloadSources": False},
                         "signatureHelp": {"enabled": True, "description": {"enabled": True}},
                         "hover": {"javadoc": {"enabled": True}},
-                        "implementationsCodeLens": {"enabled": True},
+                        "implementationsCodeLens": {"enabled": False},
                         "format": {
                             "enabled": True,
                             "settings": {"url": None, "profile": None},
@@ -1236,7 +1205,8 @@ class EclipseJDTLS(SolidLanguageServer):
                             "exportJar": {"targetPath": "${workspaceFolder}/${workspaceFolderBasename}.jar"},
                         },
                         "contentProvider": {"preferred": None},
-                        "autobuild": {"enabled": True},
+                        # Serena only navigates and edits code; compiling the workspace is not needed for that
+                        "autobuild": {"enabled": False},
                         "maxConcurrentBuilds": 1,
                         "selectionRange": {"enabled": True},
                         "showBuildStatusOnStart": {"enabled": "notification"},

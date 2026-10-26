@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Self, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self, TypeVar
 
 import yaml
 from ruamel.yaml.comments import CommentedMap
@@ -37,14 +37,12 @@ from serena.util.text_utils import GlobMatcher
 from serena.util.yaml import YamlCommentNormalisation, load_yaml, normalise_yaml_comments, save_yaml, transfer_yaml_comments
 from solidlsp.ls_config import LanguageServerId
 
-from ..analytics import RegisteredTokenCountEstimator
 from ..util.class_decorators import singleton
 from ..util.cli_util import ask_yes_no
 from ..util.dataclass import get_dataclass_default
 
 if TYPE_CHECKING:
     from ..project import Project
-    from ..tools.tools_base import Tool
 
 log = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -90,26 +88,6 @@ class SerenaPaths:
         directory containing modes defined by the user.
         If a name of a mode matches a name of a mode in SERENAS_OWN_MODES_YAML_DIR,
         the user mode will override the default mode definition.
-        """
-        self.news_legacy_last_read_id_file: str = os.path.join(self.serena_user_home_dir, "last_read_news_snippet_id.txt")
-        """
-        file containing the ID of the last read news snippet
-        """
-        self.news_read_items_file: str = os.path.join(self.serena_user_home_dir, "news_read.pkl")
-        """
-        file containing the ID of the last read news snippet
-        """
-        self.news_etag_file: str = os.path.join(self.serena_user_home_dir, "news_etag.txt")
-        """
-        file containing the ETag of the last fetched remote news JSON
-        """
-        self.news_file: str = os.path.join(self.serena_user_home_dir, "news.json")
-        """
-        local cache of the remote news JSON file
-        """
-        self.news_dir: str = os.path.join(REPO_ROOT, "news")
-        """
-        repository news directory containing the source HTML snippets and generated news.json
         """
         global_memories_path = Path(os.path.join(self.serena_user_home_dir, "memories", "global"))
         global_memories_path.mkdir(parents=True, exist_ok=True)
@@ -195,54 +173,6 @@ class ModeSelectionDefinitionWithAddedModes(ModeSelectionDefinition):
     added_modes: Sequence[str] | None = None
 
 
-class LanguageBackend(Enum):
-    LSP = "LSP"
-    """
-    Use the language server protocol (LSP), spawning freely available language servers
-    via the SolidLSP library that is part of Serena
-    """
-    JETBRAINS = "JetBrains"
-    """
-    Use the Serena plugin in your JetBrains IDE.
-    (requires the plugin to be installed and the project being worked on to be open in your IDE)
-    """
-
-    @staticmethod
-    def from_str(backend_str: str) -> "LanguageBackend":
-        for backend in LanguageBackend:
-            if backend.value.lower() == backend_str.lower():
-                return backend
-        raise ValueError(f"Unknown language backend '{backend_str}': valid values are {[b.value for b in LanguageBackend]}")
-
-    def is_lsp(self) -> bool:
-        return self == LanguageBackend.LSP
-
-    def is_jetbrains(self) -> bool:
-        return self == LanguageBackend.JETBRAINS
-
-    def get_lsp_tool_class_replacements(self) -> "dict[type[Tool], type[Tool]]":
-        """
-        :return: mapping from LSP tool classes to replacement tool classes (functional replacements)
-        """
-        match self:
-            case LanguageBackend.LSP:
-                return {}
-            case LanguageBackend.JETBRAINS:
-                from ..tools import jetbrains_tools, symbol_tools
-
-                return {
-                    symbol_tools.FindSymbolTool: jetbrains_tools.JetBrainsFindSymbolTool,
-                    symbol_tools.GetSymbolsOverviewTool: jetbrains_tools.JetBrainsGetSymbolsOverviewTool,
-                    symbol_tools.FindReferencingSymbolsTool: jetbrains_tools.JetBrainsFindReferencingSymbolsTool,
-                    symbol_tools.FindImplementationsTool: jetbrains_tools.JetBrainsFindImplementationsTool,
-                    symbol_tools.FindDeclarationTool: jetbrains_tools.JetBrainsFindDeclarationTool,
-                    symbol_tools.RenameSymbolTool: jetbrains_tools.JetBrainsRenameTool,
-                    symbol_tools.SafeDeleteSymbol: jetbrains_tools.JetBrainsSafeDeleteTool,
-                }
-            case _:
-                raise NotImplementedError()
-
-
 class LineEnding(Enum):
     """Line ending convention for file writes."""
 
@@ -280,7 +210,6 @@ class SharedConfig(ToolInclusionDefinition, ToStringMixin):
     """
 
     symbol_info_budget: float | None = None
-    language_backend: LanguageBackend | None = None
     line_ending: LineEnding | None = None
     read_only_memory_patterns: list[str] = field(default_factory=list)
     ignored_memory_patterns: list[str] = field(default_factory=list)
@@ -329,8 +258,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
     ignore_all_files_in_gitignore: bool = True
     initial_prompt: str = ""
     encoding: str = DEFAULT_SOURCE_FILE_ENCODING
-    activation_command: str | None = None
-    activation_command_timeout: float = 180.0
 
     # internal fields which are not mapped to/from the configuration file (must start with "_")
     _local_override_keys: list[str] = field(default_factory=list)
@@ -340,6 +267,10 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
     SERENA_LOCAL_PROJECT_FILE = "project.local.yml"
     FIELDS_WITHOUT_DEFAULTS = {"project_name", "language_servers"}
     RENAMED_FIELDS = {"additional_workspace_folders": "ls_additional_workspace_folders", "languages": "language_servers"}
+    REMOVED_FIELDS: ClassVar[frozenset[str]] = frozenset({"language_backend", "activation_command", "activation_command_timeout"})
+    """
+    fields of removed features which existing configuration files may still contain; they are ignored and dropped
+    """
     YAML_COMMENT_NORMALISATION = YamlCommentNormalisation.LEADING
     """
     the comment normalisation strategy to use when loading/saving project configuration files.
@@ -376,9 +307,8 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
             log.warning(
                 "No source files for supported language servers were found in %s. "
                 "Creating project with no configured language servers. "
-                "Symbol-related tools (e.g. find_symbol, get_symbols_overview) will not work "
-                "when using the LSP backend. You can add languages later via the Serena dashboard "
-                "or by manually editing the project configuration.",
+                "Symbol-related tools (e.g. find_symbol, get_symbols_overview) will not work. "
+                "You can add languages later by editing the project configuration.",
                 project_root,
             )
             language_servers_to_use = []
@@ -549,6 +479,10 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                 data[new_key] = data[old_key]
                 del data[old_key]
                 was_complete = False
+        # * ignore fields of removed features
+        for removed_key in cls.REMOVED_FIELDS.intersection(data.keys()):
+            log.debug("Ignoring setting '%s' in %s, which belongs to a removed feature", removed_key, yml_path)
+            del data[removed_key]
 
         # apply defaults
         if apply_defaults:
@@ -594,15 +528,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                     f"Invalid language server: '{orig_language_str}'.\nValid values are: {[l.value for l in LanguageServerId]}"
                 ) from e
 
-        # Validate activation_command_timeout
-        activation_command_timeout_raw = data.get("activation_command_timeout", 180.0)
-        try:
-            activation_command_timeout = float(activation_command_timeout_raw)
-        except (TypeError, ValueError) as e:
-            raise ValueError(f"activation_command_timeout must be a number, got: {activation_command_timeout_raw}") from e
-        if activation_command_timeout <= 0:
-            raise ValueError(f"activation_command_timeout must be positive, got: {activation_command_timeout}")
-
         # Validate symbol_info_budget
         symbol_info_budget_raw = data["symbol_info_budget"]
         symbol_info_budget = symbol_info_budget_raw
@@ -613,9 +538,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                 raise ValueError(f"symbol_info_budget must be a number or null, got: {symbol_info_budget_raw}") from e
             if symbol_info_budget < 0:
                 raise ValueError(f"symbol_info_budget cannot be negative, got: {symbol_info_budget}")
-
-        language_backend_value = data.get("language_backend")
-        language_backend = LanguageBackend.from_str(language_backend_value) if language_backend_value else None
 
         line_ending_value = data.get("line_ending")
         line_ending = LineEnding.from_str(line_ending_value) if line_ending_value else None
@@ -646,13 +568,10 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
             initial_prompt=data["initial_prompt"],
             encoding=data["encoding"],
             line_ending=line_ending,
-            language_backend=language_backend,
             added_modes=data["added_modes"],
             default_modes=data["default_modes"],
             symbol_info_budget=symbol_info_budget,
             ls_specific_settings=data.get("ls_specific_settings", {}),
-            activation_command=data.get("activation_command"),
-            activation_command_timeout=activation_command_timeout,
             _local_override_keys=local_override_keys,
         )
 
@@ -670,7 +589,6 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
 
         # map fields using non-primitive types to a YAML-compatible representation
         d["language_servers"] = [lang.value for lang in self.language_servers]
-        d["language_backend"] = self.language_backend.value if self.language_backend is not None else None
         d["line_ending"] = self.line_ending.value if self.line_ending is not None else None
 
         return d
@@ -874,32 +792,13 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     # *** fields that are mapped directly to/from the configuration file (DO NOT RENAME) ***
 
     projects: list[RegisteredProject] = field(default_factory=list)
-    gui_log_window: bool = False
     log_level: int = logging.INFO
     trace_lsp_communication: bool = False
-    web_dashboard: bool = True
-    web_dashboard_open_on_launch: bool = True
-    web_dashboard_interface: str | None = None
-    web_dashboard_listen_address: str = "127.0.0.1"
-    web_dashboard_trusted_hosts: list[str] = field(default_factory=lambda: ["127.0.0.1", "localhost"])
-    jetbrains_plugin_server_address: str = "127.0.0.1"
-    jetbrains_launch_command: str | None = None
-    """
-    JetBrains IDE launch command, which can be used to auto-start an IDE instance on demand.
-    """
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT
     """
     timeout for tool calls in seconds; if a tool takes longer than this, it is aborted and an error is returned.
     """
 
-    token_count_estimator: str = RegisteredTokenCountEstimator.CHAR_COUNT.name
-    """Only relevant if `record_tool_usage` is True; the name of the token count estimator to use for tool usage statistics.
-    See the `RegisteredTokenCountEstimator` enum for available options.
-    
-    Note: some token estimators (like tiktoken) may require downloading data files
-    on the first run, which can take some time and require internet access. Others, like the Anthropic ones, may require an API key
-    and rate limits may apply.
-    """
     default_max_tool_answer_chars: int = 150_000
     """Used as default for tools where the apply method has a default maximal answer length.
     Even though the value of the max_answer_chars can be changed when calling the tool, it may make sense to adjust this default 
@@ -936,10 +835,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
 
     # settings with overridden defaults
 
-    language_backend: LanguageBackend = LanguageBackend.LSP
-    """
-    the language backend to use for code understanding features
-    """
     line_ending: LineEnding = LineEnding.NATIVE
     symbol_info_budget: float = 10.0
     """
@@ -962,7 +857,26 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
     # *** static members ***
 
     CONFIG_FILE = "serena_config.yml"
-    CONFIG_FIELDS_WITH_TYPE_CONVERSION = {"projects", "language_backend", "line_ending"}
+    CONFIG_FIELDS_WITH_TYPE_CONVERSION = {"projects", "line_ending"}
+    REMOVED_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "gui_log_window",
+            "web_dashboard",
+            "web_dashboard_open_on_launch",
+            "web_dashboard_interface",
+            "web_dashboard_listen_address",
+            "web_dashboard_trusted_hosts",
+            "language_backend",
+            "jetbrains",
+            "jetbrains_plugin_server_address",
+            "jetbrains_launch_command",
+            "token_count_estimator",
+        }
+    )
+    """
+    fields of removed features which existing configuration files may still contain; they are ignored and dropped
+    (and thus disappear from the file the next time the configuration is saved)
+    """
 
     # *** methods ***
     @classmethod
@@ -1044,6 +958,11 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         except Exception as e:
             raise ValueError(f"Error loading Serena configuration from {config_file_path}: {e}") from e
 
+        # ignore fields of removed features
+        for removed_key in cls.REMOVED_FIELDS.intersection(loaded_commented_yaml.keys()):
+            log.debug("Ignoring setting '%s' in %s, which belongs to a removed feature", removed_key, config_file_path)
+            del loaded_commented_yaml[removed_key]
+
         # create the configuration instance
         instance = cls(_loaded_commented_yaml=loaded_commented_yaml, _config_file_path=config_file_path)
         num_migrations = 0
@@ -1095,20 +1014,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
                 project_config=project_config,
             )
             instance.projects.append(project)
-
-        # determine language backend
-        language_backend = get_dataclass_default(SerenaConfig, "language_backend")
-        if "language_backend" in loaded_commented_yaml:
-            backend_str = loaded_commented_yaml["language_backend"]
-            language_backend = LanguageBackend.from_str(backend_str)
-        else:
-            # backward compatibility (migrate Boolean field "jetbrains")
-            if "jetbrains" in loaded_commented_yaml:
-                num_migrations += 1
-                if loaded_commented_yaml["jetbrains"]:
-                    language_backend = LanguageBackend.JETBRAINS
-                del loaded_commented_yaml["jetbrains"]
-        instance.language_backend = language_backend
 
         # determine line ending
         line_ending_value = loaded_commented_yaml.get("line_ending")
@@ -1163,33 +1068,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         except Exception as e:
             log.error(f"Error migrating configuration file: {e}")
             return None
-
-    @classmethod
-    def init(cls, language_backend: LanguageBackend) -> "SerenaConfig":
-        """
-        Supports the config initialisation CLI command, allowing the user to configure fundamental settings before
-        the first launch.
-
-        :param language_backend: the language backend to use
-        :return: the created SerenaConfig instance
-        """
-        config = cls.from_config_file()
-        config.language_backend = language_backend
-        config._save()
-        return config
-
-    def with_headless_mode_overrides(self) -> "SerenaConfig":
-        """
-        Modifies this instance to apply overrides for headless mode, where any GUI/user interaction-based features are disabled.
-        This is intended to be applied for cases where a `SerenaConfig` instance is needed to instantiate a `SerenaAgent` instance
-        while the user is not expected to interact with the system (e.g. a CLI command or a test).
-
-        :return: the instance with overrides applied for headless mode
-        """
-        self.gui_log_window = False
-        self.web_dashboard = False
-        self.jetbrains_launch_command = None
-        return self
 
     @cached_property
     def project_paths(self) -> list[str]:
@@ -1334,9 +1212,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         # convert project objects into list of paths
         commented_yaml["projects"] = sorted({str(project.project_root) for project in self.projects})
 
-        # convert language backend to string
-        commented_yaml["language_backend"] = self.language_backend.value
-
         # convert line ending to string
         commented_yaml["line_ending"] = self.line_ending.value
 
@@ -1422,14 +1297,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
         serena_folder = self.get_project_serena_folder(project_root)
         return os.path.join(serena_folder, ProjectConfig.SERENA_PROJECT_FILE)
 
-    def propagate_settings(self) -> None:
-        """
-        Propagate settings from this configuration to individual components that are statically configured
-        """
-        from serena.tools import JetBrainsPluginClient
-
-        JetBrainsPluginClient.set_server_address(self.jetbrains_plugin_server_address)
-
     def is_trusted_project_path(self, project_root: str | Path) -> bool:
         """
         Checks if the given project root path matches any of the trusted project root patterns.
@@ -1442,17 +1309,6 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
             if GlobMatcher(pattern).matches(project_root_str):
                 return True
         return False
-
-    def determine_language_backend(self, project_config: ProjectConfig | None = None, log_choice: bool = False):
-        language_backend = self.language_backend
-        if project_config and project_config.language_backend is not None:
-            language_backend = project_config.language_backend
-            if log_choice:
-                log.info(f"Using language backend as configured in project: {language_backend.name}")
-        else:
-            if log_choice:
-                log.info(f"Using language backend from global configuration: {language_backend.name}")
-        return language_backend
 
     def get_ls_priority(self, ls_id: LanguageServerId) -> int:
         """

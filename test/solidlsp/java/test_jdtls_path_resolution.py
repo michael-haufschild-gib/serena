@@ -9,13 +9,12 @@ mocked.
 
 from __future__ import annotations
 
-import platform
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-_JAVA_EXE_NAME = "java.exe" if platform.system() == "Windows" else "java"
+_JAVA_EXE_NAME = "java"
 
 from solidlsp.language_servers.eclipse_jdtls import (
     JDTLS_CONFIG_DIR_BY_PLATFORM,
@@ -243,11 +242,7 @@ class TestResolveConfigDir:
         "platform_id,expected_dir",
         [
             ("osx-arm64", "config_mac_arm"),
-            ("darwin-arm64", "config_mac_arm"),
             ("osx-x64", "config_mac"),
-            ("linux-arm64", "config_linux_arm"),
-            ("linux-x64", "config_linux"),
-            ("win-x64", "config_win"),
         ],
     )
     def test_maps_platform_to_correct_config_dir(self, tmp_path: Path, platform_id: str, expected_dir: str) -> None:
@@ -262,7 +257,7 @@ class TestResolveConfigDir:
         # plugins/ exists but no config_<platform>/ for current OS
         (tmp_path / "plugins").mkdir()
         with patch("solidlsp.language_servers.eclipse_jdtls.PlatformUtils.get_platform_id") as mock_get_pid:
-            mock_get_pid.return_value.value = "linux-x64"
+            mock_get_pid.return_value.value = "osx-arm64"
             with pytest.raises(SolidLSPException, match="Config directory .* not found"):
                 EclipseJDTLS.DependencyProvider._resolve_config_dir(tmp_path)
 
@@ -460,7 +455,7 @@ class TestSetupFromExistingInstall:
     ) -> None:
         jdk = self._fake_jdk(tmp_path)
         with patch("solidlsp.language_servers.eclipse_jdtls.PlatformUtils.get_platform_id") as mock_pid:
-            mock_pid.return_value.value = "linux-x64"
+            mock_pid.return_value.value = "osx-arm64"
             with patch.object(EclipseJDTLS.DependencyProvider, "_resolve_system_jdk", return_value=(str(jdk), str(jdk / "bin" / "java"))):
                 result = EclipseJDTLS.DependencyProvider._setup_from_existing_install(str(jdtls_root), str(lombok_jar), custom_settings)
 
@@ -468,7 +463,7 @@ class TestSetupFromExistingInstall:
         assert result.lombok_jar_path == str(lombok_jar)
         assert result.jre_home_path == str(jdk)
         assert Path(result.jdtls_launcher_jar_path).name.startswith("org.eclipse.equinox.launcher_")
-        assert Path(result.jdtls_readonly_config_path).name == "config_linux"
+        assert Path(result.jdtls_readonly_config_path).name == "config_mac_arm"
 
     def test_raises_for_nonexistent_jdtls_path(
         self, tmp_path: Path, lombok_jar: Path, custom_settings: SolidLSPSettings.CustomLSSettings

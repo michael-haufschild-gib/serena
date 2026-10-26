@@ -1,35 +1,18 @@
 import logging
 import os
-import platform
-import queue
+import shlex
 import signal
 import subprocess
 import threading
-from collections.abc import Callable
-from typing import IO, TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import IO, TYPE_CHECKING, Generic, TypeVar
 
-import oslex
-import psutil
 from sensai.util.string import ToStringMixin
 
 if TYPE_CHECKING:
-    import ctypes
-
     from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 
 log = logging.getLogger(__name__)
 TStream = TypeVar("TStream", bound=str | bytes)
-
-
-def subprocess_kwargs() -> dict:
-    """
-    Returns a dictionary of keyword arguments for subprocess calls, adding platform-specific
-    flags that we want to use consistently.
-    """
-    kwargs = {}
-    if platform.system() == "Windows":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return kwargs
 
 
 def subprocess_run(
@@ -49,7 +32,6 @@ def subprocess_run(
     :return: a CompletedProcess instance containing information about the completed process
     """
     kwargs = dict(kwargs)
-    kwargs.update(subprocess_kwargs())
     kwargs.update(
         {
             "timeout": timeout,
@@ -63,33 +45,33 @@ def subprocess_run(
 
 def convert_shell_cmd(cmd: str | list[str]) -> str:
     """
-    Converts a command (specified as a list or string) to a format supported by subprocess calls with shell=True on the current platform,
-    applying necessary escaping and quoting if the command is specified as a list of arguments.
+    Converts a command to a string suitable for subprocess calls with ``shell=True``, quoting the
+    arguments if the command is given as a list.
 
-    :param cmd: the command to convert, specified as a list of arguments
-    :return: a suitable representation of the command for subprocess calls on the current platform
+    :param cmd: the command to convert, specified as a list of arguments or as a string
+    :return: the shell command string
     """
-    return oslex.join(cmd) if isinstance(cmd, list) else cmd
+    return shlex.join(cmd) if isinstance(cmd, list) else cmd
 
 
 class ManagedSubprocess(Generic[TStream], ToStringMixin):
     """
-    Represents a subprocess.Popen instance with additional lifecycle management, including the ability to terminate the process
-    and its children gracefully, with a fallback to forceful termination if necessary.
+    Represents a subprocess.Popen instance running in its own process group, which can be terminated
+    together with all its descendants, gracefully at first and forcefully if necessary.
     """
 
-    def __init__(self, popen: subprocess.Popen[TStream], name: str, start_new_session: bool) -> None:
+    def __init__(self, popen: subprocess.Popen[TStream], name: str, reaper: "ProcessGroupReaper") -> None:
         """
-        :param popen: the subprocess.Popen instance representing the launched process
+        :param popen: the subprocess.Popen instance, which must have been launched with ``start_new_session=True``
         :param name: the name of the process (used for logging purposes); should start with a capital letter
-        :param start_new_session: whether the process was launched in its own session, i.e. whether it is the
-            leader of its own process group
+        :param reaper: the reaper the process group is registered with, which is told when the group is gone
         """
         self._popen = popen
         self._name = name
+        self._reaper = reaper
 
         # a process launched with start_new_session=True is its own group leader, so its PGID is its PID
-        self._process_group_id = popen.pid if (start_new_session and os.name == "posix") else None
+        self._process_group_id = popen.pid
 
     def _tostring_includes(self) -> list[str]:
         return ["_name"]
@@ -124,40 +106,96 @@ class ManagedSubprocess(Generic[TStream], ToStringMixin):
 
     def terminate(self, timeout: float) -> None:
         """
-        Terminates the process and its children, forcefully killing them if they do not exit in time.
+        Terminates the process and all other processes in its group, forcefully killing them if they do
+        not exit in time.
 
         :param timeout: the time, in seconds, to wait for the process to terminate gracefully before killing it
         """
-        terminate_process_tree_with_kill_fallback(
+        terminate_process_group_with_kill_fallback(
             self._popen,
+            self._process_group_id,
             terminate_timeout=timeout,
             process_name=self._name,
-            process_group_id=self._process_group_id,
         )
+        self._reaper.unregister(self._process_group_id)
+
+
+class ProcessGroupReaper:
+    """
+    Guarantees that the process groups registered with it do not outlive this process, even if this
+    process is killed without any chance to clean up (e.g. SIGKILL).
+
+    It runs a minimal watcher shell in its own session, which reads group registrations from a pipe.
+    The write end of that pipe is held only by this process, so the kernel closes it when this process
+    dies, however that happens; the watcher then reads end-of-file and kills every group still registered.
+    Groups that were terminated regularly are unregistered first, so a later reuse of their IDs is safe.
+    """
+
+    _WATCHER_SCRIPT = """
+groups=""
+while IFS= read -r line; do
+  case "$line" in
+    +*) groups="$groups ${line#+}" ;;
+    -*) gone="${line#-}"; rest=""
+        for g in $groups; do [ "$g" = "$gone" ] || rest="$rest $g"; done
+        groups="$rest" ;;
+  esac
+done
+[ -z "$groups" ] && exit 0
+for g in $groups; do kill -TERM -"$g" 2>/dev/null; done
+sleep 2
+for g in $groups; do kill -KILL -"$g" 2>/dev/null; done
+"""
+    """the watcher, a POSIX shell script; lines `+<pgid>` register a group, lines `-<pgid>` unregister it"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._watcher: subprocess.Popen[bytes] | None = None
+
+    def _send(self, line: str) -> None:
+        with self._lock:
+            if self._watcher is None or self._watcher.poll() is not None:
+                self._watcher = subprocess.Popen(
+                    ["/bin/sh", "-c", self._WATCHER_SCRIPT],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,  # immune to signals sent to our own process group
+                )
+            assert self._watcher.stdin is not None
+            try:
+                self._watcher.stdin.write(f"{line}\n".encode())
+                self._watcher.stdin.flush()
+            except OSError as e:
+                log.warning(f"Could not notify the process group watcher ({line}): {e}")
+
+    def register(self, process_group_id: int) -> None:
+        """
+        :param process_group_id: the group to kill should this process die without terminating it first
+        """
+        self._send(f"+{process_group_id}")
+
+    def unregister(self, process_group_id: int) -> None:
+        """
+        :param process_group_id: a group previously registered via :meth:`register` that has been terminated
+        """
+        self._send(f"-{process_group_id}")
 
 
 class ManagedSubprocessLauncher:
     """
     Launcher for managed subprocesses (see :class:`ManagedSubprocess`), which are started for stdio-based communication.
-    It is home to the concern of launching a subprocess with well-defined lifecycle properties,
-    ensuring, in particular, that a launched subprocess cannot outlive this process (insofar as
-    the platform allows) -- even if the subprocess is started in its own session (see
-    :meth:`launch`) and this process is terminated forcefully without the opportunity to perform
-    cleanup (e.g. SIGKILL).
+    It is home to the concern of launching a subprocess with well-defined lifecycle properties: every
+    subprocess runs in its own process group, which cannot outlive this process (see :class:`ProcessGroupReaper`).
 
-    The class is a singleton, as it is (potentially) home to a persistent worker thread.
+    The class is a singleton, as it owns the process-wide reaper.
     """
-
-    _PR_SET_PDEATHSIG = 1
-    """the PR_SET_PDEATHSIG option value for prctl(2)"""
 
     _instance: "ManagedSubprocessLauncher | None" = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
-        self._libc = self._load_libc()
-        self._spawner: "ManagedSubprocessLauncher._PDeathSigSpawner | None" = None
-        self._spawner_lock = threading.Lock()
+        self._reaper = ProcessGroupReaper()
 
     @classmethod
     def get_instance(cls) -> "ManagedSubprocessLauncher":
@@ -167,158 +205,35 @@ class ManagedSubprocessLauncher:
                     cls._instance = cls()
         return cls._instance
 
-    @staticmethod
-    def _load_libc() -> "ctypes.CDLL | None":
+    def launch(self, process_launch_info: "ProcessLaunchInfo", name: str) -> ManagedSubprocess[bytes]:
         """
-        Loads libc if on Linux, where it is needed for pdeathsig protection.
-        """
-        if platform.system() != "Linux":
-            return None
-        import ctypes
-
-        try:
-            # resolve libc, passing None to resolve symbols from the current process image (which is linked against libc on any Linux)
-            return ctypes.CDLL(None)
-        except OSError as e:
-            log.warning(
-                "Could not load libc (%s); subprocesses will not be protected against "
-                "orphaning if this process is killed without a chance to shut down cleanly",
-                e,
-            )
-            return None
-
-    def _set_pdeathsig_on_parent_exit(self) -> None:
-        """
-        preexec_fn for subprocess.Popen (no-op if libc is unavailable), which asks the kernel, via
-        prctl(PR_SET_PDEATHSIG), to send this process SIGTERM when its parent dies for any reason,
-        including SIGKILL.
-        """
-        if self._libc is not None:
-            self._libc.prctl(self._PR_SET_PDEATHSIG, signal.SIGTERM)
-
-    def launch(self, process_launch_info: "ProcessLaunchInfo", name: str, start_new_session: bool) -> ManagedSubprocess[bytes]:
-        """
-        Launches a subprocess from ``process_launch_info``.
+        Launches a subprocess from ``process_launch_info`` in its own session (and hence its own process group).
 
         :param process_launch_info: the command, environment and working directory to launch with
         :param name: the name of the process (used for logging purposes); should start with a capital letter
-        :param start_new_session: whether to start the process in its own session (own process
-            group, detached from ours)
         """
         # build the child environment from ours, overridden by the launch info's entries
         child_proc_env = os.environ.copy()
         child_proc_env.update(process_launch_info.env)
 
-        # convert the command for shell=True execution, prefixing `exec` when pdeathsig applies
-        use_pdeathsig = start_new_session and self._libc is not None
-        cmd = convert_shell_cmd(process_launch_info.cmd)
-        if use_pdeathsig:
-            # `exec` makes the shell replace its own process image with the program (execve)
-            # instead of forking it as a child, so the PID -- and therefore the PR_SET_PDEATHSIG
-            # registration below, which execve preserves -- carries through to the actual language
-            # server process rather than protecting only the intermediate shell
-            cmd = f"exec {cmd}"
-
-        # assemble platform kwargs and lifecycle settings
-        kwargs: dict[str, Any] = subprocess_kwargs()
-        kwargs["start_new_session"] = start_new_session
-        if use_pdeathsig:
-            kwargs["preexec_fn"] = self._set_pdeathsig_on_parent_exit
-
-        def do_popen() -> ManagedSubprocess[bytes]:
-            popen = cast(
-                "subprocess.Popen[bytes]",
-                subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stdin=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=child_proc_env,
-                    cwd=process_launch_info.cwd,
-                    shell=True,
-                    **kwargs,
-                ),
-            )
-            return ManagedSubprocess(popen, name, start_new_session)
-
-        # perform the actual Popen call, funneling the fork() through the dedicated spawner thread
-        # when pdeathsig applies
-        if not use_pdeathsig:
-            return do_popen()
-        else:
-            with self._spawner_lock:
-                if self._spawner is None:
-                    self._spawner = self._PDeathSigSpawner()
-                spawner = self._spawner
-            return spawner.spawn(do_popen)
-
-    class _PDeathSigSpawner:
-        """
-        Runs subprocess.Popen() calls that register PR_SET_PDEATHSIG on one dedicated, permanently
-        running daemon thread, so the "parent thread" the kernel ties the registration to is one
-        that has the same lifetime as the process
-        """
-
-        def __init__(self) -> None:
-            self._queue: queue.Queue[tuple[Callable[[], ManagedSubprocess[bytes]], "queue.Queue"]] = queue.Queue()
-            self._thread = threading.Thread(target=self._run, name="solidlsp-pdeathsig-spawner", daemon=True)
-            self._thread.start()
-
-        def _run(self) -> None:
-            while True:
-                func, result_queue = self._queue.get()
-                try:
-                    result_queue.put((None, func()))
-                except BaseException as e:
-                    result_queue.put((e, None))
-
-        def spawn(self, func: Callable[[], ManagedSubprocess[bytes]]) -> ManagedSubprocess[bytes]:
-            result_queue: queue.Queue = queue.Queue(maxsize=1)
-            self._queue.put((func, result_queue))
-            error, process = result_queue.get()
-            if error is not None:
-                raise error
-            return process
-
-
-def _signal_process_tree(process: subprocess.Popen[bytes], terminate: bool = True) -> None:
-    """
-    Sends a signal (terminate or kill) to the given process and all its children.
-
-    :param terminate: if True, signal terminate, otherwise signal kill
-    """
-
-    def signal_process(p: subprocess.Popen | psutil.Process) -> None:
-        try:
-            if terminate:
-                p.terminate()
-            else:
-                p.kill()
-        except:
-            pass
-
-    # Try to get the parent process
-    parent = None
-    try:
-        parent = psutil.Process(process.pid)
-    except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):
-        pass
-
-    # If we have the parent process and it's running, signal the entire tree
-    if parent and parent.is_running():
-        for child in parent.children(recursive=True):
-            signal_process(child)
-        signal_process(parent)
-    # Otherwise, fall back to direct process signaling
-    else:
-        signal_process(process)
+        popen = subprocess.Popen(
+            convert_shell_cmd(process_launch_info.cmd),
+            stdout=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=child_proc_env,
+            cwd=process_launch_info.cwd,
+            shell=True,
+            start_new_session=True,
+        )
+        self._reaper.register(popen.pid)
+        return ManagedSubprocess(popen, name, self._reaper)
 
 
 def _signal_process_group(pgid: int, terminate: bool = True) -> None:
     """
-    Sends a signal to every process in the given POSIX process group by group ID, without
-    enumerating the system process table. Requires the caller to know the group already exists
-    and is owned by us (see ``terminate_process_tree_with_kill_fallback``'s ``process_group_id``).
+    Sends a signal to every process in the given process group by group ID, without enumerating the
+    system process table (which can be denied even for processes we started and own).
 
     :param pgid: the process group ID to signal
     :param terminate: if True, signal terminate (SIGTERM), otherwise signal kill (SIGKILL)
@@ -335,46 +250,34 @@ def _signal_process_group(pgid: int, terminate: bool = True) -> None:
         log.warning(f"Unexpected error signaling process group {pgid} with {sig.name}: {e}")
 
 
-def terminate_process_tree_with_kill_fallback(
+def terminate_process_group_with_kill_fallback(
     process: subprocess.Popen,
+    process_group_id: int,
     terminate_timeout: float,
     process_name: str = "Process",
-    process_group_id: int | None = None,
 ) -> None:
     """
-    Attempts to terminate the given process and its children by signaling them to terminate,
-    and if that fails (i.e. they don't exit within the given timeout), forcefully kills them.
+    Terminates the process group led by the given process by signaling it to terminate, and kills the
+    group forcefully if the leader does not exit within the given timeout.
 
     The termination is logged.
 
-    :param process: the process to terminate
+    :param process: the group leader, i.e. a process launched with ``start_new_session=True``
+    :param process_group_id: the ID of the group led by ``process`` (equal to its PID). Never pass the group of
+        a process that shares our own group: signaling it would also signal us.
     :param terminate_timeout: the time to wait for the process to terminate gracefully before killing it
     :param process_name: the name of the process (used for logging purposes); should start with capital letter
-    :param process_group_id: if given, the POSIX process group ID that ``process`` leads (i.e. it was
-        launched with ``start_new_session=True``, so its PGID equals its PID). When set, cleanup
-        signals the whole group directly via ``os.killpg`` instead of walking the process tree with
-        ``psutil``, which requires system-wide process-table enumeration (``sysctl(KERN_PROC_ALL)`` on
-        macOS) that can be denied even for processes we started and own. Only pass this for a process
-        that was started in its own session: signaling the group of a process that shares ours would
-        also signal us.
     """
     log.debug(f"Terminating process {process.pid}, current status: {process.poll()}")
 
-    def signal_tree(terminate: bool) -> None:
-        if process_group_id is not None:
-            _signal_process_group(process_group_id, terminate=terminate)
-        else:
-            _signal_process_tree(process, terminate=terminate)
-
-    signal_tree(terminate=True)
+    _signal_process_group(process_group_id, terminate=True)
     try:
         log.debug(f"Waiting for process {process.pid} to terminate...")
         exit_code = process.wait(timeout=terminate_timeout)
         log.info(f"{process_name} terminated successfully with exit code {exit_code}.")
     except subprocess.TimeoutExpired:
-        # If termination failed, forcefully kill the process
         log.warning(f"{process_name} (pid={process.pid}) termination timed out, killing process forcefully...")
-        signal_tree(terminate=False)
+        _signal_process_group(process_group_id, terminate=False)
         try:
             exit_code = process.wait(timeout=2.0)
             log.info(f"{process_name} killed successfully with exit code {exit_code}.")
@@ -382,3 +285,6 @@ def terminate_process_tree_with_kill_fallback(
             log.error(f"{process_name} (pid={process.pid}) could not be killed within timeout.")
     except Exception as e:
         log.error(f"Error during process shutdown: {e}")
+
+    # children that outlived the leader (e.g. ignoring SIGTERM) remain in the group; make sure they are gone too
+    _signal_process_group(process_group_id, terminate=False)

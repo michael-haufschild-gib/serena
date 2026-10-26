@@ -150,7 +150,7 @@ class LanguageServerManager:
         # causing suboptimal agent behaviour.
         if exceptions:
             for ls in language_servers.values():
-                ls.stop()
+                LanguageServerManager._stop_language_server(ls)
             failure_messages = "\n".join([f"{lang.value}: {e}" for lang, e in exceptions.items()])
             raise LanguageServerManagerInitialisationError(f"Failed to start {len(exceptions)} language server(s):\n{failure_messages}")
 
@@ -198,6 +198,7 @@ class LanguageServerManager:
         """
         if language not in self._language_servers:
             raise ValueError(f"No language server for language {language.value} present; cannot restart")
+        self._language_servers[language].close_caches()
         return self._create_and_start_language_server(language)
 
     def add_language_server(self, ls_id: LanguageServerId) -> SolidLanguageServer:
@@ -211,7 +212,7 @@ class LanguageServerManager:
             raise ValueError(f"Language server for language {ls_id.value} already present")
         return self._create_and_start_language_server(ls_id)
 
-    def remove_language_server(self, language: LanguageServerId, save_cache: bool = False) -> None:
+    def remove_language_server(self, language: LanguageServerId) -> None:
         """
         Removes the language server for the given language, stopping it if it is running.
 
@@ -220,7 +221,7 @@ class LanguageServerManager:
         if language not in self._language_servers:
             raise ValueError(f"No language server for language {language.value} present; cannot remove")
         ls = self._language_servers.pop(language)
-        self._stop_language_server(ls, save_cache=save_cache)
+        self._stop_language_server(ls)
 
     def get_active_language_server_ids(self) -> list[LanguageServerId]:
         """
@@ -231,34 +232,27 @@ class LanguageServerManager:
         return list(self._language_servers.keys())
 
     @staticmethod
-    def _stop_language_server(ls: SolidLanguageServer, save_cache: bool = False, timeout: float = 2.0) -> None:
+    def _stop_language_server(ls: SolidLanguageServer, timeout: float = 2.0) -> None:
+        """
+        Stops the given language server for good, closing its (persistent) symbol caches.
+        """
         if ls.is_running():
-            if save_cache:
-                ls.save_cache()
             log.info(f"Stopping language server for language {ls.ls_id} ...")
             ls.stop(shutdown_timeout=timeout)
+        ls.close_caches()
 
     def iter_language_servers(self) -> Iterator[SolidLanguageServer]:
         for ls in self._language_servers.values():
             yield self._ensure_functional_ls(ls)
 
-    def stop_all(self, save_cache: bool = False, timeout: float = 2.0) -> None:
+    def stop_all(self, timeout: float = 2.0) -> None:
         """
         Stops all managed language servers.
 
-        :param save_cache: whether to save the cache before stopping
         :param timeout: timeout for shutdown of each language server
         """
         for ls in self.iter_language_servers():
-            self._stop_language_server(ls, save_cache=save_cache, timeout=timeout)
-
-    def save_all_caches(self) -> None:
-        """
-        Saves the caches of all managed language servers.
-        """
-        for ls in self.iter_language_servers():
-            if ls.is_running():
-                ls.save_cache()
+            self._stop_language_server(ls, timeout=timeout)
 
     def has_suitable_ls_for_file(self, relative_file_path: str) -> bool:
         return self._get_suitable_language_server(relative_file_path) is not None

@@ -23,7 +23,7 @@ def test_search_for_pattern_snippet_stage(tmp_path):
         ]
     (tmp_path / "data.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    project = Project.load(str(tmp_path), serena_config=SerenaConfig(gui_log_window=False, web_dashboard=False))
+    project = Project.load(str(tmp_path), serena_config=SerenaConfig())
     agent = MagicMock()
     agent.get_active_project_or_raise.return_value = project
     tool = SearchForPatternTool(agent)

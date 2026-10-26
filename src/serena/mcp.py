@@ -24,11 +24,10 @@ from serena.agent import (
     SerenaAgent,
 )
 from serena.config.context_mode import SerenaAgentContext
-from serena.config.serena_config import LanguageBackend, ModeSelectionDefinition, SerenaConfig
+from serena.config.serena_config import ModeSelectionDefinition, SerenaConfig
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
 from serena.tools import Tool, ToolCallError
-from serena.util.exception import show_fatal_exception_safe
-from serena.util.logging import MemoryLogHandler
+from serena.util.exception import report_fatal_exception
 
 log = logging.getLogger(__name__)
 
@@ -143,29 +142,28 @@ class SerenaFastMCPTool(FastMCPTool):
 
 class SerenaMCPFactory:
     """
-    Factory for the creation of the Serena MCP server with an associated SerenaAgent.
+    Factory for the creation of the Serena MCP server (served via stdio) with an associated SerenaAgent.
+    """
+
+    _OPENAI_TOOL_COMPATIBLE_CONTEXTS = frozenset({"codex"})
+    """
+    the names of the contexts whose clients require tool schemas that are compatible with OpenAI tools
     """
 
     def __init__(
         self,
-        transport: Literal["stdio", "sse", "streamable-http"],
         context: str = DEFAULT_CONTEXT,
         project: str | None = None,
-        memory_log_handler: MemoryLogHandler | None = None,
     ):
         """
-        :param transport: The transport to use for the MCP server.
         :param context: The context name or path to context file
         :param project: Either an absolute path to the project directory or a name of an already registered project.
             If the project passed here hasn't been registered yet, it will be registered automatically and can be activated by its name
             afterward.
-        :param memory_log_handler: the in-memory log handler to use for the agent's logging
         """
-        self.transport = transport
         self.context = SerenaAgentContext.load(context)
         self.project = project
         self.agent: SerenaAgent | None = None
-        self.memory_log_handler = memory_log_handler
 
     @staticmethod
     def _sanitize_for_openai_tools(schema: dict) -> dict:
@@ -314,19 +312,12 @@ class SerenaMCPFactory:
             serena_config=serena_config,
             context=self.context,
             modes=modes,
-            memory_log_handler=self.memory_log_handler,
             project_activation_error=project_activation_error,
         )
 
     def create_mcp_server(
         self,
-        host: str = "127.0.0.1",
-        port: int = 8000,
         mode_selection_def: ModeSelectionDefinition | None = None,
-        language_backend: LanguageBackend | None = None,
-        enable_web_dashboard: bool | None = None,
-        enable_gui_log_window: bool | None = None,
-        open_web_dashboard: bool | None = None,
         log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None,
         trace_lsp_communication: bool | None = None,
         tool_timeout: float | None = None,
@@ -335,15 +326,7 @@ class SerenaMCPFactory:
         """
         Create an MCP server with process-isolated SerenaAgent to prevent asyncio contamination.
 
-        :param host: The host to bind to
-        :param port: The port to bind to
         :param mode_selection_def: the mode selection definition to apply
-        :param language_backend: the language backend to use, overriding the configuration setting.
-        :param enable_web_dashboard: Whether to enable the web dashboard. If not specified, will take the value from the serena configuration.
-        :param enable_gui_log_window: Whether to enable the GUI log window. It currently does not work on macOS, and setting this to True will be ignored then.
-            If not specified, will take the value from the serena configuration.
-        :param open_web_dashboard: Whether to open the web dashboard on launch.
-            If not specified, will take the value from the serena configuration.
         :param log_level: Log level. If not specified, will take the value from the serena configuration.
         :param trace_lsp_communication: Whether to trace the communication between Serena and the language servers.
             This is useful for debugging language server issues.
@@ -354,12 +337,6 @@ class SerenaMCPFactory:
             config = SerenaConfig.from_config_file()
 
             # update configuration with the provided parameters
-            if enable_web_dashboard is not None:
-                config.web_dashboard = enable_web_dashboard
-            if enable_gui_log_window is not None:
-                config.gui_log_window = enable_gui_log_window
-            if open_web_dashboard is not None:
-                config.web_dashboard_open_on_launch = open_web_dashboard
             if log_level is not None:
                 log_level = cast(Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], log_level.upper())
                 config.log_level = logging.getLevelNamesMapping()[log_level]
@@ -367,13 +344,11 @@ class SerenaMCPFactory:
                 config.trace_lsp_communication = trace_lsp_communication
             if tool_timeout is not None:
                 config.tool_timeout = tool_timeout
-            if language_backend is not None:
-                config.language_backend = language_backend
 
             self.agent = self._create_serena_agent(config, modes=mode_selection_def, project_activation_error=project_activation_error)
 
         except Exception as e:
-            show_fatal_exception_safe(e)
+            report_fatal_exception(e)
             raise
 
         # Override model_config to disable the use of `.env` files for reading settings, because user projects are likely to contain
@@ -386,8 +361,6 @@ class SerenaMCPFactory:
             name="Serena",
             lifespan=self.server_lifespan,
             website_url="https://oraios.github.io/serena",
-            host=host,
-            port=port,
             instructions=instructions,
         )
         return mcp
@@ -395,13 +368,12 @@ class SerenaMCPFactory:
     @asynccontextmanager
     async def server_lifespan(self, mcp_server: FastMCP) -> AsyncIterator[None]:
         """
-        Manages the lifespan of MCP server instances and performs necessary setup and teardown.
-        For stdio transport, there is a single server instance.
-        For other transports, this is called once per connection!
+        Manages the lifespan of the (single, stdio-served) MCP server instance and performs necessary setup and teardown,
+        shutting down the agent when the server stops.
 
         :param mcp_server: the MCP server instance to configure
         """
-        openai_tool_compatible = self.context.name in ["chatgpt", "codex", "oaicompat-agent"]
+        openai_tool_compatible = self.context.name in self._OPENAI_TOOL_COMPATIBLE_CONTEXTS
         assert self.agent is not None
         context = self.agent.get_context()
         self._set_mcp_tools(mcp_server, openai_tool_compatible=openai_tool_compatible, structured_output=context.structured_tool_output)
@@ -409,14 +381,9 @@ class SerenaMCPFactory:
         try:
             yield
         finally:
-            # Shut down the server if we are running in stdio mode.
-            # For other transports, we do nothing; the singleton agent instance remains active.
-            if self.transport == "stdio":
-                log.info("MCP server shutting down")
-                if self.agent is not None:
-                    self.agent.on_shutdown()
-            else:
-                log.info("Client disconnected")
+            log.info("MCP server shutting down")
+            if self.agent is not None:
+                self.agent.on_shutdown()
 
     def _get_initial_instructions(self) -> str:
         assert self.agent is not None

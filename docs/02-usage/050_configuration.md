@@ -23,9 +23,6 @@ The global configuration file allows you to change general settings and defaults
 ### Settings
 
 Some of the configurable settings include:
-  * the language backend to use by default (i.e., the JetBrains plugin or language servers);
-    this can also be [overridden per project](per-project-language-backend)
-  * UI settings affecting the [Serena Dashboard and GUI tool](060_dashboard.md)
   * the set of tools to enable/disable by default
   * the set of [modes](modes) to use by default
   * tool execution parameters (timeout, max. answer length)
@@ -43,12 +40,10 @@ For detailed information on the parameters and possible settings, see the
 
 ### Accessing the Configuration File
 
-The configuration file is auto-created when you first run Serena. It is stored in your user directory:
-  * Linux/macOS/Git-Bash: `~/.serena/serena_config.yml`
-  * Windows (CMD/PowerShell): `%USERPROFILE%\.serena\serena_config.yml`
+The configuration file is auto-created when you first run Serena. It is stored in your user directory
+at `~/.serena/serena_config.yml`.
 
 You can access it
-  * through [Serena's dashboard](060_dashboard) while Serena is running (use the respective button) 
   * directly, using your favourite text editor
   * using the command
 
@@ -74,8 +69,7 @@ Serena comes with pre-defined contexts:
   The full set of Serena's tools is provided, as the application is assumed to have no prior coding-specific capabilities.
 * `claude-code`: Optimized for use with Claude Code, it disables tools that would duplicate Claude Code's built-in capabilities.
 * `codex`: Optimized for use with OpenAI Codex.
-* `grok`: Optimized for use with xAI's Grok Build CLI.
-* `ide`: Generic context for IDE assistants/coding agents, e.g. VSCode, Cursor, or Cline, focusing on augmenting existing capabilities.
+* `antigravity`: Optimized for use with Antigravity.
   Basic file operations and shell execution are assumed to be handled by the assistant's own capabilities.
 * `agent`: Designed for scenarios where Serena acts as a more autonomous agent, for example, when used with Agno.
 
@@ -83,7 +77,7 @@ Choose the context that best matches the type of integration you are using.
 
 Find the concrete definitions of the above contexts [here](https://github.com/oraios/serena/tree/main/src/serena/resources/config/contexts).
 
-Note that the contexts `ide`, `claude-code`, and `grok` are **single-project contexts** (defining `single_project: true`).
+Note that the contexts `claude-code` and `antigravity` are **single-project contexts** (defining `single_project: true`).
 For such contexts, if a project is provided at startup, the set of tools is limited to those required by the project's
 concrete configuration, and other tools are excluded completely, allowing the set of tools to be minimal.
 Tools explicitly disabled by the project will not be available at all. Since changing the active project
@@ -91,8 +85,6 @@ ceases to be a relevant operation in this case, the project activation tool is d
 
 When launching Serena, specify the context using `--context <context-name>`.
 Note that for cases where parameter lists are specified (e.g. Claude Desktop), you must add two parameters to the list.
-
-If you are using a local server (such as Llama.cpp) which requires you to use OpenAI-compatible tool descriptions, use context `oaicompat-agent` instead of `agent`.
 
 You can manage contexts using the `context` command,
 
@@ -177,7 +169,7 @@ The following variables can be used in all of the above templates:
 |---------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `available_tools`   | the list of names of the tools that are currently exposed to the LLM. Use it to include content conditionally, e.g. `{% if 'replace_content' in available_tools %}…{% endif %}`.                                                                                                                                                                           |
 | `available_markers` | the list of names of the tool markers (tool categories, e.g. `ToolMarkerSymbolicRead`) for which at least one tool is exposed; useful for conditioning on entire groups of tools.                                                                                                                                                                          |
-| `tool_names`        | a mapping from canonical tool names to effective tool names, which accounts for legacy tool renames as well as for tools being functionally replaced due to the active language backend (e.g. `find_symbol` being replaced by `jet_brains_find_symbol` when the JetBrains backend is active). Prefer `{{ tool_names['find_symbol'] }}` over hard-coded names. |
+| `tool_names`        | a mapping from canonical tool names to effective tool names, which accounts for legacy tool renames. Prefer `{{ tool_names['find_symbol'] }}` over hard-coded names. |
 
 Context, mode and project prompts (but not Serena's system prompt) additionally support the following function:
 
@@ -1324,7 +1316,7 @@ It is advisable to use the default prompt as a starting point and modify it to s
 ### Usage Reporting
 
 On startup, Serena reports anonymous usage data to help us understand Serena usage.
-Specifically, we collect the Serena version, the operating system & language backend being used as well as the dashboard enabled status.
+Specifically, we collect the Serena version, the operating system and the context being used.
 No personally identifiable information or project-specific information is collected.
 
 If you want to opt out of usage reporting, set the environment variable `SERENA_USAGE_REPORTING` to `false`.

@@ -124,8 +124,6 @@ Like `read_only_memory_patterns`, patterns from the global and project-level con
 ### Manually Editing Memories
 
 You may edit memories directly in the file system, using your preferred text editor or IDE.
-Alternatively, access them via the [Serena Dashboard](060_dashboard), which provides a graphical interface for
-viewing, creating, editing, and deleting memories while Serena is running.
 
 (onboarding)=
 ## Onboarding

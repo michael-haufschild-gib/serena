@@ -1,21 +1,18 @@
 # C/C++ Setup Guide
 
-This guide explains how to prepare a C/C++ project so that Serena can provide reliable code intelligence via clangd or ccls language servers.
-This is only necessary if you use the language server variant of Serena, for users of the Serena JetBrains plugin no setup is required
-and the limitations described below do not apply.
+This guide explains how to prepare a C/C++ project so that Serena can provide reliable code intelligence via the clangd language server.
 
 ---
 
 ## General
 
-Serena supports two C/C++ language servers, clangd (default) and ccls.
-Both have their pros and cons and require a properly configured `compile_commands.json` 
+Serena uses the clangd language server for C/C++, which requires a properly configured `compile_commands.json` 
 for cross-file reference finding, see below for details.
 
 Your project must have a `compile_commands.json` file at the repository root. 
 This file is essential for correct parsing and cross-file reference finding.
 
-You can use a specific clangd or ccls installation (e.g., a custom build or a version provided by your project),
+You can use a specific clangd installation (e.g., a custom build or a version provided by your project),
 by specifying the path in your configuration, see [ls-specific-settings](ls-specific-settings) for details.
 
 ## compile_commands.json Requirements
@@ -44,50 +41,13 @@ language_servers:
     compile_commands_dir: custom/rel/path (defaults to .serena)
 ```
 
-### With ccls
-
-ccls requires manual installation and configuration. It may perform better in some situations.
-
-#### Installation
-
-**Linux:**
-```bash
-# Ubuntu/Debian (22.04+)
-sudo apt-get install ccls
-
-# Fedora/RHEL
-sudo dnf install ccls
-
-# Arch Linux
-sudo pacman -S ccls
-```
-
-**macOS:**
-```bash
-brew install ccls
-```
-
-**Windows:**
-
-```bash
-choco install ccls
-```
-
-#### Configuration
-
-After installing ccls, configure Serena to use it via project settings (in `.serena/project.yml`)
-by adding `cpp_ccls` to the `languages` list. Replace `cpp` with `cpp_ccls` if you already have the `cpp` entry.
-
-ccls can handle relative paths in `compile_commands.json`, so no transformation is necessary
-and no transformed `compile_commands.json` file will be created.
-
 ---
 
 ## Known Limitations
 
 ### Files Created After Server Initialization
 
-Both clangd and ccls have a fundamental limitation: 
+clangd has a fundamental limitation: 
 **files created by external mechanisms after the language server starts are not automatically indexed**.
 
 Cross-file references to newly created files will not work unless the new file is at some point opened by the language server (for example, by a symbol lookup in it), or until `compile_commands.json` is updated and 
@@ -99,7 +59,6 @@ the language server is restarted.
 
 - Clangd official documentation: https://clangd.llvm.org/
 - Clangd project setup: https://clangd.llvm.org/installation#project-setup
-- CCLS repository: https://github.com/MaskRay/ccls
 
 ## Unreal Engine projects
 

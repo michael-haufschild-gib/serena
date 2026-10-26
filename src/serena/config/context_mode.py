@@ -14,7 +14,6 @@ from sensai.util.string import ToStringMixin
 from serena.config.serena_config import SerenaPaths, ToolInclusionDefinition
 from serena.constants import (
     DEFAULT_CONTEXT,
-    INTERNAL_MODE_YAMLS_DIR,
     SERENA_FILE_ENCODING,
     SERENAS_OWN_CONTEXT_YAMLS_DIR,
     SERENAS_OWN_MODE_YAMLS_DIR,
@@ -104,14 +103,6 @@ class SerenaAgentMode(ToolInclusionDefinition, ToStringMixin):
         """Load a registered Serena mode."""
         mode_path = cls.get_path(name)
         return cls.from_yaml(mode_path)
-
-    @classmethod
-    def from_name_internal(cls, name: str) -> Self:
-        """Loads an internal Serena mode"""
-        yaml_path = os.path.join(INTERNAL_MODE_YAMLS_DIR, f"{name}.yml")
-        if not os.path.exists(yaml_path):
-            raise FileNotFoundError(f"Internal mode '{name}' not found in {INTERNAL_MODE_YAMLS_DIR}")
-        return cls.from_yaml(yaml_path)
 
     @classmethod
     def list_registered_mode_names(cls, include_user_modes: bool = True) -> list[str]:

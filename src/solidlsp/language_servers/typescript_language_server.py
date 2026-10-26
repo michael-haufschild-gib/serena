@@ -8,7 +8,6 @@ import re
 import shutil
 import threading
 import time
-from typing import Any
 
 from overrides import override
 from sensai.util.logging import LogTime
@@ -17,7 +16,6 @@ from solidlsp import ls_types
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
-from solidlsp.ls_utils import PlatformId, PlatformUtils
 from solidlsp.lsp_protocol_handler.lsp_types import MessageType
 from solidlsp.settings import SolidLSPSettings
 
@@ -32,21 +30,6 @@ INITIAL_TYPESCRIPT_VERSION = "5.9.3"
 DEFAULT_TYPESCRIPT_VERSION = "5.9.3"
 INITIAL_TYPESCRIPT_LANGUAGE_SERVER_VERSION = "5.1.3"
 DEFAULT_TYPESCRIPT_LANGUAGE_SERVER_VERSION = "5.1.3"
-
-# Platform-specific imports
-if os.name != "nt":  # Unix-like systems
-    import pwd
-else:
-    # Dummy pwd module for Windows
-    class pwd:
-        @staticmethod
-        def getpwuid(uid: Any) -> Any:
-            return type("obj", (), {"pw_name": os.environ.get("USERNAME", "unknown")})()
-
-
-# Conditionally import pwd module (Unix-only)
-if not PlatformUtils.get_platform_id().value.startswith("win"):
-    pass
 
 
 def prefer_non_node_modules_definition(definitions: list[ls_types.Location]) -> ls_types.Location:
@@ -94,6 +77,7 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         - server_ready_timeout: float, timeout in seconds for the server-ready signal (default: 10.0)
         - indexing_start_grace: float, timeout in seconds to wait for tsserver to *start*
           reporting indexing progress before the first cross-file reference query (default: 5.0)
+        - max_tsserver_memory_mb: int, heap limit of the tsserver process in MB (default: 3072)
     """
 
     @classmethod
@@ -109,6 +93,9 @@ class TypeScriptLanguageServer(SolidLanguageServer):
     # create the first progress token, and that resolution is proportional to project size, so a
     # large project can genuinely take longer than a small one just to begin reporting.
     INDEXING_START_GRACE = 5.0
+    # Heap limit of tsserver (the value VS Code uses by default); without it, node's own default
+    # applies, which lets a single tsserver grow to several GB on large projects.
+    MAX_TSSERVER_MEMORY_MB = 3072
 
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
         """
@@ -123,9 +110,6 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         )
         self.server_ready = threading.Event()
         self.initialize_searcher_command_available = threading.Event()
-
-        # tracking asynchronous diagnostics publication
-        self._published_diagnostics_timeout = 5.0
 
         # tracking project indexing progress
         self._progress_lock = threading.Lock()
@@ -267,21 +251,6 @@ class TypeScriptLanguageServer(SolidLanguageServer):
             """
             Setup runtime dependencies for TypeScript Language Server and return the path to the executable.
             """
-            platform_id = PlatformUtils.get_platform_id()
-
-            valid_platforms = [
-                PlatformId.LINUX_x64,
-                PlatformId.LINUX_arm64,
-                PlatformId.OSX,
-                PlatformId.OSX_x64,
-                PlatformId.OSX_arm64,
-                PlatformId.WIN_x64,
-                PlatformId.WIN_arm64,
-            ]
-            assert platform_id in valid_platforms, (
-                f"Platform {platform_id} is not supported for multilspy javascript/typescript at the moment"
-            )
-
             # Get version settings from ls_specific_settings or use defaults
             language_specific_config = self._custom_settings
             typescript_version = language_specific_config.get("typescript_version", DEFAULT_TYPESCRIPT_VERSION)
@@ -349,14 +318,16 @@ class TypeScriptLanguageServer(SolidLanguageServer):
     def _create_base_initialize_params(self) -> dict:
         initialize_params = {
             "locale": "en",
-            # Disable Automatic Type Acquisition (ATA): with ATA enabled, tsserver fetches
-            # @types/* packages from npm in the background during indexing, which makes startup
-            # slow, network-dependent, and nondeterministic (and can hang on offline/locked-down
-            # machines). Serena relies on the types already installed in the project instead.
             "initializationOptions": {
-                "preferences": {
-                    "disableAutomaticTypingAcquisition": True,
-                },
+                # Disable Automatic Type Acquisition (ATA): with ATA enabled, tsserver runs a separate
+                # typings installer process that fetches @types/* packages from npm in the background,
+                # which makes startup slow, network-dependent and nondeterministic. Serena relies on
+                # the types already installed in the project instead.
+                "disableAutomaticTypingAcquisition": True,
+                "maxTsServerMemory": int(self._custom_settings.get("max_tsserver_memory_mb", self.MAX_TSSERVER_MEMORY_MB)),
+                # run a single tsserver instead of a separate syntax server next to the semantic one;
+                # the syntax server only speeds up editor-style interactive requests
+                "tsserver": {"useSyntaxServer": "never"},
             },
             "capabilities": {
                 "textDocument": {
@@ -569,20 +540,6 @@ class TypeScriptLanguageServer(SolidLanguageServer):
                 timeout,
                 self.describe_indexing_state(),
             )
-
-    @override
-    def _get_published_diagnostics_uri(self, request_uri: str) -> str:
-        if os.name != "nt" or not request_uri.startswith("file:///"):
-            return request_uri
-
-        path_part = request_uri[len("file:///") :]
-        if len(path_part) >= 2 and path_part[0].isalpha() and path_part[1] == ":":
-            return f"file:///{path_part[0].lower()}%3A{path_part[2:]}"
-        return request_uri
-
-    @override
-    def _get_published_diagnostics_wait_timeout(self, pull_diagnostics_failed: bool) -> float:
-        return self._published_diagnostics_timeout
 
     @override
     def _pre_open_for_cross_file_references(self) -> None:

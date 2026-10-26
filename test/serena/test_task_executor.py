@@ -95,32 +95,3 @@ def test_task_executor_cancel_future(executor):
         pass
     assert task1.did_run
     assert not task2.did_run
-
-
-def test_task_executor_cancellation_via_task_info(executor):
-    start_time = time.time()
-    executor.issue_task(Task(10).run, "task1")
-    executor.issue_task(Task(10).run, "task2")
-    task_infos = executor.get_current_tasks()
-    task_infos2 = executor.get_current_tasks()
-
-    # test expected tasks
-    assert len(task_infos) == 2
-    assert "task1" in task_infos[0].name
-    assert "task2" in task_infos[1].name
-
-    # test task identifiers being stable
-    assert task_infos2[0].task_id == task_infos[0].task_id
-
-    # test cancellation
-    task_infos[0].cancel()
-    time.sleep(0.5)
-    task_infos3 = executor.get_current_tasks()
-    assert len(task_infos3) == 1  # Cancelled task is gone from the queue
-    task_infos3[0].cancel()
-    try:
-        task_infos3[0].future.result()
-    except:
-        pass
-    end_time = time.time()
-    assert (end_time - start_time) < 9, "Cancelled task did not stop in time"

@@ -5,26 +5,22 @@ import re
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from copy import copy
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal
 
 import pytest
 from _pytest.mark import Mark, MarkDecorator, ParameterSet
 
 from serena.agent import SerenaAgent
-from serena.config.context_mode import SerenaAgentContext
 from serena.config.serena_config import ProjectConfig, RegisteredProject, SerenaConfig
 from serena.project import Project
 from serena.tools import (
     SUCCESS_RESULT,
     ActivateProjectTool,
-    EditingToolWithDiagnostics,
     FindDeclarationTool,
     FindImplementationsTool,
     FindReferencingSymbolsTool,
     FindSymbolTool,
-    GetDiagnosticsForFileTool,
     InitialInstructionsTool,
     ReplaceContentTool,
     ReplaceInFilesTool,
@@ -35,12 +31,10 @@ from serena.tools import (
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind
 from test.conftest import (
-    find_identifier_pos,
     get_pytest_markers,
     get_repo_path,
     language_server_tests_enabled,
 )
-from test.serena.config.test_context_mode import GROK_EXCLUDED_TOOLS
 
 
 @dataclass
@@ -135,77 +129,6 @@ class SafeDeleteCase(BaseCase):
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "relative_path", self.relative_path.replace("\\", "/"))
-
-
-@dataclass
-class DiagnosticCase(BaseCase):
-    relative_path: str
-    name_path1: str
-    name_path2: str | None
-    message_fragment1: str
-    message_fragment2: str | None
-
-    @property
-    def symbol1_id_str(self) -> str:
-        return self.name_path1.split("/")[-1]
-
-    @property
-    def symbol2_id_str(self) -> str | None:
-        if self.name_path2 is None:
-            return None
-        return self.name_path2.split("/")[-1]
-
-    def without_second_symbol(self) -> "DiagnosticCase":
-        result = copy(self)
-        result.name_path2 = None
-        result.message_fragment2 = None
-        return result
-
-    def assert_matches(self, tool_output: dict) -> None:
-        """
-
-        :param tool_output: Output of diagnostics tool, representing the mapping `relative_path -> severity -> name_path -> diagnostics_results`.
-        :return:
-        """
-        assert self.relative_path in tool_output, (
-            f"Missing diagnostics for relative path {self.relative_path} in tool output keys: {list(tool_output.keys())}"
-        )
-        severity_group = tool_output[self.relative_path]
-        assert "Error" in severity_group, severity_group
-        name_path_group = severity_group["Error"]
-
-        for expected_name_path in [self.name_path1, self.name_path2]:
-            if expected_name_path is not None:
-                assert expected_name_path in name_path_group, name_path_group
-
-        diagnostic_messages = [
-            diagnostic["message"] for diagnostics_for_name_path in name_path_group.values() for diagnostic in diagnostics_for_name_path
-        ]
-        for expected_fragment in [self.message_fragment1, self.message_fragment2]:
-            if expected_fragment is not None:
-                assert any(expected_fragment in message for message in diagnostic_messages), diagnostic_messages
-
-
-DIAGNOSTIC_CASES = [
-    DiagnosticCase(
-        ls_id=LanguageServerId.PYTHON,
-        id=f"{LanguageServerId.PYTHON.value}_missing_user",
-        relative_path=os.path.join("test_repo", "diagnostics_sample.py"),
-        name_path1="broken_factory",
-        name_path2="broken_consumer",
-        message_fragment1="missing_user",
-        message_fragment2="undefined_name",
-    ).to_pytest_param(),
-    DiagnosticCase(
-        ls_id=LanguageServerId.TYPESCRIPT,
-        id=f"{LanguageServerId.TYPESCRIPT.value}_missingGreeting",
-        relative_path="diagnostics_sample.ts",
-        name_path1="brokenFactory",
-        name_path2="brokenConsumer",
-        message_fragment1="missingGreeting",
-        message_fragment2="missingConsumerValue",
-    ).to_pytest_param(),
-]
 
 
 FIND_DEFINING_SYMBOL_CASES = [
@@ -525,7 +448,7 @@ SAFE_DELETE_SUCCEEDS_CASES = [
 
 @pytest.fixture
 def serena_config():
-    config = SerenaConfig(log_level=logging.ERROR, tool_timeout=600).with_headless_mode_overrides()
+    config = SerenaConfig(log_level=logging.ERROR, tool_timeout=600)
 
     # Create test projects for all supported languages
     test_projects = []
@@ -565,13 +488,6 @@ def read_project_file(project: Project, relative_path: str) -> str:
     file_path = os.path.join(project.project_root, relative_path)
     with open(file_path, encoding=project.project_config.encoding) as f:
         return f.read()
-
-
-def parse_edit_diagnostics_result(result: str) -> dict:
-    """Utility function to parse the diagnostic payload returned by edit tools."""
-    assert EditingToolWithDiagnostics.DIAGNOSTICS_KEY in result
-    d = json.loads(result)
-    return d[EditingToolWithDiagnostics.DIAGNOSTICS_KEY]
 
 
 @contextmanager
@@ -624,27 +540,8 @@ class TestSerenaAgent:
           * an invalid project path is specified at startup
         All cases must not raise an exception.
         """
-        serena_config = SerenaConfig().with_headless_mode_overrides()
+        serena_config = SerenaConfig()
         SerenaAgent(project=project, serena_config=serena_config)
-
-    @pytest.mark.python
-    @pytest.mark.skipif(not language_server_tests_enabled(LanguageServerId.PYTHON), reason="python tests are disabled in this environment")
-    def test_grok_context_restricts_toolset_and_prompt(self, serena_config):
-        agent = SerenaAgent(
-            project="test_repo_python",
-            serena_config=serena_config,
-            context=SerenaAgentContext.from_name("grok"),
-        )
-        agent.execute_task(lambda: None)
-
-        try:
-            exposed = {tool.get_name() for tool in agent.get_exposed_tool_instances()}
-            assert exposed.isdisjoint(GROK_EXCLUDED_TOOLS)
-            assert "activate_project" not in exposed
-            assert {"find_symbol", "get_symbols_overview", "replace_symbol_body"} <= exposed
-            assert "Serena's code intelligence tools" in agent.create_system_prompt()
-        finally:
-            agent.on_shutdown(timeout=5)
 
     def _symbol_matches_expected_name(self, symbol: dict, expected_name: str) -> bool:
         return (
@@ -762,31 +659,6 @@ class TestSerenaAgent:
                 relative_path=case.relative_path,
                 containing_symbol_name_path=case.containing_symbol_name_path,
             )
-
-    @pytest.mark.parametrize("serena_agent,diagnostic_case", DIAGNOSTIC_CASES, indirect=["serena_agent"])
-    def test_get_diagnostics_for_file(self, serena_agent: SerenaAgent, diagnostic_case: DiagnosticCase) -> None:
-        diagnostics_tool = serena_agent.get_tool(GetDiagnosticsForFileTool)
-        result = diagnostics_tool.apply(
-            relative_path=diagnostic_case.relative_path,
-            min_severity=1,
-        )
-        full_file_diagnostics = json.loads(result)
-        diagnostic_case.assert_matches(full_file_diagnostics)
-
-        # testing diagnostics in range by removing second symbol
-        project_root = get_repo_path(diagnostic_case.ls_id)
-        pos1 = find_identifier_pos(project_root / diagnostic_case.relative_path, diagnostic_case.symbol1_id_str)
-        pos2 = find_identifier_pos(project_root / diagnostic_case.relative_path, cast(str, diagnostic_case.symbol2_id_str))
-        assert pos1 is not None
-        assert pos2 is not None
-        result = diagnostics_tool.apply(
-            relative_path=diagnostic_case.relative_path,
-            min_severity=1,
-            start_line=pos1[0],
-            end_line=pos2[0] - 1,
-        )
-        diagnostics_in_range = json.loads(result)
-        diagnostic_case.without_second_symbol().assert_matches(diagnostics_in_range)
 
     @pytest.mark.parametrize("serena_agent,case", FIND_IMPLEMENTATION_CASES, indirect=["serena_agent"])
     def test_find_symbol_implementations(self, serena_agent: SerenaAgent, case: FindImplementationCase) -> None:
@@ -982,64 +854,6 @@ class TestSerenaAgent:
                 tool.apply(needle=needle, repl="X", mode="literal", relative_path=relative_path, expected_count=1)
             assert re.search(r"\[[^\[\]]+:\d+@[0-9a-f]{6}\]", str(exc_info.value))  # the listing with ids is included
             assert read_project_file(serena_agent.get_active_project(), relative_path) == original_content
-
-    @pytest.mark.parametrize(
-        "serena_agent",
-        [pytest.param(LanguageServerId.PYTHON, marks=get_pytest_markers(LanguageServerId.PYTHON), id="python_services")],
-        indirect=["serena_agent"],
-    )
-    def test_replace_content_reports_new_diagnostics(self, serena_agent: SerenaAgent):
-        """Tests that file-level edits report newly introduced diagnostics."""
-        relative_path = os.path.join("test_repo", "services.py")
-        replace_content_tool = serena_agent.get_tool(ReplaceContentTool)
-        try:
-            replace_content_tool.ENABLE_DIAGNOSTICS = True
-
-            with project_file_modification_context(serena_agent, relative_path):
-                result = replace_content_tool.apply(
-                    relative_path=relative_path,
-                    needle="return container",
-                    repl="return missing_container",
-                    mode="literal",
-                )
-
-            diagnostics = parse_edit_diagnostics_result(result)
-            relative_path_result = diagnostics[relative_path]
-            diagnostic_messages = json.dumps(relative_path_result)
-            assert "missing_container" in diagnostic_messages
-            assert "create_service_container" in diagnostic_messages
-        finally:
-            replace_content_tool.ENABLE_DIAGNOSTICS = False
-
-    @pytest.mark.parametrize(
-        "serena_agent",
-        [pytest.param(LanguageServerId.PYTHON, marks=get_pytest_markers(LanguageServerId.PYTHON), id="python_container_body")],
-        indirect=["serena_agent"],
-    )
-    def test_replace_symbol_body_reports_new_diagnostics(self, serena_agent: SerenaAgent):
-        """Tests that symbol-level edits report newly introduced diagnostics."""
-        relative_path = os.path.join("test_repo", "services.py")
-        replace_symbol_body_tool = serena_agent.get_tool(ReplaceSymbolBodyTool)
-        try:
-            replace_symbol_body_tool.ENABLE_DIAGNOSTICS = True
-
-            with project_file_modification_context(serena_agent, relative_path):
-                result = replace_symbol_body_tool.apply(
-                    name_path="create_service_container",
-                    relative_path=relative_path,
-                    body="""
-    def create_service_container() -> dict[str, Any]:
-        return missing_container
-    """,
-                )
-
-            diagnostics = parse_edit_diagnostics_result(result)
-            relative_path_result = diagnostics[relative_path]
-            diagnostic_messages = json.dumps(relative_path_result)
-            assert "missing_container" in diagnostic_messages
-            assert "create_service_container" in diagnostic_messages
-        finally:
-            replace_symbol_body_tool.ENABLE_DIAGNOSTICS = False
 
     @pytest.mark.parametrize(
         "serena_agent",

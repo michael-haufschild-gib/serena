@@ -17,7 +17,7 @@ from sensai.util.logging import LogTime
 from serena.agent import SerenaAgent, Tool
 from serena.config.context_mode import SerenaAgentContext
 from serena.constants import REPO_ROOT
-from serena.util.exception import show_fatal_exception_safe
+from serena.util.exception import report_fatal_exception
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ class SerenaAgnoAgentProvider:
                 try:
                     serena_agent = SerenaAgent(project_file, context=SerenaAgentContext.load("agent"))
                 except Exception as e:
-                    show_fatal_exception_safe(e)
+                    report_fatal_exception(e)
                     raise
 
             # Even though we don't want to keep history between sessions,

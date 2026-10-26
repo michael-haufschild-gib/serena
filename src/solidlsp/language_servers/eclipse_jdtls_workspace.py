@@ -2,6 +2,7 @@
 Management of the on-disk Eclipse workspace and OSGi configuration directories used by JDTLS.
 """
 
+import fcntl
 import logging
 import os
 import shutil
@@ -73,27 +74,11 @@ class _ExclusiveFileLock:
 
         :raises OSError: if the lock is held by another process.
         """
-        if os.name == "nt":
-            import msvcrt
-
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     @staticmethod
     def _unlock_handle(handle: IO[bytes]) -> None:
-        if os.name == "nt":
-            import msvcrt
-
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class JdtlsWorkspace:

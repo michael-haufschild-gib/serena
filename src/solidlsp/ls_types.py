@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, NotRequired, Union
 from sensai.util.helper import mark_used
 from typing_extensions import TypedDict
 
-from solidlsp.lsp_protocol_handler.lsp_types import DiagnosticSeverity, SymbolKind
+from solidlsp.lsp_protocol_handler.lsp_types import SymbolKind
 
 if TYPE_CHECKING:
     from .ls import SymbolBody
@@ -334,23 +334,6 @@ class WorkspaceEdit(TypedDict):
     """ Holds changes to existing resources. """
     documentChanges: NotRequired[list]
     """ Document changes array for versioned edits. """
-
-
-class Diagnostic(TypedDict):
-    """Diagnostic information for a text document."""
-
-    uri: DocumentUri
-    """ The URI of the text document to which the diagnostics apply. """
-    range: Range
-    """ The range of the text document to which the diagnostics apply. """
-    severity: NotRequired[DiagnosticSeverity]
-    """ The severity of the diagnostic. """
-    message: str
-    """ The diagnostic message. """
-    code: NotRequired[str | int]
-    """ The code of the diagnostic. """
-    source: NotRequired[str]
-    """ The source of the diagnostic, e.g. the name of the tool that produced it. """
 
 
 class SignatureHelp(TypedDict):

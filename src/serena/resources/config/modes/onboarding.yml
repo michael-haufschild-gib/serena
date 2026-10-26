@@ -13,4 +13,3 @@ excluded_tools:
   - delete_lines
   - replace_lines
   - insert_at_line
-  - execute_shell_command

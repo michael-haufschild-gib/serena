@@ -7,13 +7,8 @@ making use of an IDE's capabilities would.
 Serena can efficiently find the right context and do the right thing even in very large and
 complex projects!
 
-There are two alternative technologies powering these capabilities:
-
-* **Language servers** implementing the language server Protocol (LSP) — the free/open-source alternative.
-* **The Serena JetBrains Plugin**, which leverages the powerful code analysis and editing
-  capabilities of your JetBrains IDE.
-
-See the [Features](025_features) section for a detailed comparison of the capabilities provided by the JetBrains Plugin vs. language servers.
+These capabilities are powered by language servers implementing the language server protocol (LSP).
+See the [Features](025_features) section for an overview of the capabilities.
 
 (language-servers)=
 ## Language Servers
@@ -50,7 +45,7 @@ Some languages require additional installations or setup steps, as noted.
 * **BSL** (1C:Enterprise / OneScript)  
   (requires Java 21+ on PATH; uses [bsl-language-server](https://github.com/1c-syntax/bsl-language-server) by 1c-syntax; the JAR is auto-downloaded and SHA-256-verified for the bundled default version; supports `.bsl` and `.os` files; configure optional `ls_path` or `bsl_ls_version` under `ls_specific_settings.bsl`)
 * **C#**  
-  (by default, uses the Roslyn language server (language `csharp`), requiring [.NET v10+](https://dotnet.microsoft.com/en-us/download/dotnet) and, on Windows, `pwsh` ([PowerShell 7+](https://learn.microsoft.com/en-us/powershell/scripting/install/install-powershell-on-windows?view=powershell-7.5));
+  (by default, uses the Roslyn language server (language `csharp`), requiring [.NET v10+](https://dotnet.microsoft.com/en-us/download/dotnet);
   set language to `csharp_omnisharp` to use OmiSharp instead)
 * **C/C++**  
   (by default, uses the clangd language server (language `cpp`) but we also support ccls (language `cpp_ccls`);
@@ -189,23 +184,3 @@ Some languages require additional installations or setup steps, as noted.
 
 Support for further languages can easily be added by providing a shallow adapter for a new language server implementation,
 see Serena's [memory on that](https://github.com/oraios/serena/blob/main/.serena/memories/adding_new_language_support_guide.md).
-
-## The Serena JetBrains Plugin
-
-The [Serena JetBrains Plugin](https://plugins.jetbrains.com/plugin/28946-serena/) leverages the powerful code analysis capabilities of JetBrains IDEs. 
-The plugin naturally supports all programming languages and frameworks that are supported by JetBrains IDEs.
-
-When using the plugin, Serena connects to an instance of your JetBrains IDE via the plugin. For users who already
-work in a JetBrains IDE, this means Serena seamlessly integrates with the IDE instance you typically have open anyway,
-requiring no additional setup or configuration beyond the plugin itself.
-
-* See the [JetBrains Plugin documentation](../02-usage/025_jetbrains_plugin) for a high-level overview of its benefits and usage details.
-* See the [Features](025_features) section for a detailed comparison of the capabilities provided by the JetBrains Plugin vs. language servers.
-
-```{raw} html
-<p>
-<a href="https://plugins.jetbrains.com/plugin/28946-serena/">
-<img style="background-color:transparent;" src="../_static/images/jetbrains-marketplace-button.png">
-</a>
-</p>
-```

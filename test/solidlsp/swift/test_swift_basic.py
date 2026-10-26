@@ -15,7 +15,6 @@ from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerId
 from test.conftest import is_ci, language_server_tests_enabled
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
-from test.solidlsp.util.diagnostics import assert_file_diagnostics
 
 pytestmark = [
     pytest.mark.swift,
@@ -237,12 +236,3 @@ class TestSwiftProjectBasics:
                 f"Found malformed symbols: {[format_symbol_for_assert(sym) for sym in malformed_symbols]}",
                 pytrace=False,
             )
-
-    @pytest.mark.parametrize("language_server", [LanguageServerId.SWIFT], indirect=True)
-    def test_file_diagnostics(self, language_server: SolidLanguageServer) -> None:
-        assert_file_diagnostics(
-            language_server,
-            "src/diagnostics_sample.swift",
-            (),
-            min_count=1,
-        )

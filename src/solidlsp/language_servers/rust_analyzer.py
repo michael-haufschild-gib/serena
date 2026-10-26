@@ -4,19 +4,15 @@ Provides Rust specific instantiation of the LanguageServer class. Contains vario
 
 import logging
 import os
-import pathlib
-import platform
 import shutil
 import subprocess
 import threading
 
 from overrides import override
 
-from solidlsp import ls_types
 from solidlsp.ls import (
     LanguageServerDependencyProvider,
     LanguageServerDependencyProviderSinglePath,
-    LSPConstants,
     SolidLanguageServer,
 )
 from solidlsp.ls_config import LanguageServerConfig
@@ -123,62 +119,25 @@ class RustAnalyzer(SolidLanguageServer):
                 if RustAnalyzer.DependencyProvider._is_rust_analyzer_functional(path_result):
                     return path_result
 
-            # Determine platform-specific binary name and paths
-            is_windows = platform.system() == "Windows"
-            binary_name = "rust-analyzer.exe" if is_windows else "rust-analyzer"
-
-            # Fallback to common installation locations
-            common_paths: list[str | None] = []
-
-            if is_windows:
-                # Windows-specific paths
-                home = pathlib.Path.home()
-                common_paths.extend(
-                    [
-                        str(home / ".cargo" / "bin" / binary_name),  # cargo install / rustup
-                        str(home / "scoop" / "shims" / binary_name),  # Scoop package manager
-                        str(home / "scoop" / "apps" / "rust-analyzer" / "current" / binary_name),  # Scoop direct
-                        str(
-                            pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "rust-analyzer" / binary_name
-                        ),  # Standalone install
-                    ]
-                )
-            else:
-                # Unix-like paths (macOS, Linux)
-                common_paths.extend(
-                    [
-                        "/opt/homebrew/bin/rust-analyzer",  # macOS Homebrew (Apple Silicon)
-                        "/usr/local/bin/rust-analyzer",  # macOS Homebrew (Intel) / Linux system
-                        os.path.expanduser("~/.cargo/bin/rust-analyzer"),  # cargo install
-                        os.path.expanduser("~/.local/bin/rust-analyzer"),  # User local bin
-                    ]
-                )
+            # fall back to common installation locations
+            common_paths = [
+                "/opt/homebrew/bin/rust-analyzer",  # Homebrew (Apple Silicon)
+                "/usr/local/bin/rust-analyzer",  # Homebrew (Intel)
+                os.path.expanduser("~/.cargo/bin/rust-analyzer"),  # cargo install
+                os.path.expanduser("~/.local/bin/rust-analyzer"),  # user-local bin
+            ]
 
             for path in common_paths:
-                if path and os.path.isfile(path) and os.access(path, os.X_OK):
+                if os.path.isfile(path) and os.access(path, os.X_OK):
                     return path
 
-            # Provide helpful error message with all searched locations
-            searched = [p for p in common_paths if p]
+            # provide a helpful error message with all searched locations
+            searched = common_paths
             install_instructions = [
                 "  - Rustup: rustup component add rust-analyzer",
                 "  - Cargo: cargo install rust-analyzer",
+                "  - Homebrew: brew install rust-analyzer",
             ]
-            if is_windows:
-                install_instructions.extend(
-                    [
-                        "  - Scoop: scoop install rust-analyzer",
-                        "  - Chocolatey: choco install rust-analyzer",
-                        "  - Standalone: Download from https://github.com/rust-lang/rust-analyzer/releases",
-                    ]
-                )
-            else:
-                install_instructions.extend(
-                    [
-                        "  - Homebrew (macOS): brew install rust-analyzer",
-                        "  - System package manager (Linux): apt/dnf/pacman install rust-analyzer",
-                    ]
-                )
 
             raise RuntimeError(
                 "rust-analyzer is not installed or not in PATH.\n"
@@ -501,7 +460,7 @@ class RustAnalyzer(SolidLanguageServer):
                     "previewRustcOutput": False,
                     "useRustcErrorCode": False,
                     "disabled": [],
-                    "enable": True,
+                    "enable": False,  # Serena does not report diagnostics
                     "experimental": {"enable": False},
                     "remapPrefix": {},
                     "warningsAsHint": [],
@@ -512,13 +471,13 @@ class RustAnalyzer(SolidLanguageServer):
                 "showDependenciesExplorer": True,
                 "assist": {"emitMustUse": False, "expressionFillDefault": "todo"},
                 # Eager cache priming and automatic Cargo reloads can repeatedly
-                # index large, actively-built workspaces. Keep checkOnSave enabled
-                # because Rust diagnostics rely on flycheck.
+                # index large, actively-built workspaces.
                 "cachePriming": {"enable": False, "numThreads": 0},
                 "cargo": {
                     "autoreload": True,
+                    # running build scripts compiles every dependency's build.rs; navigation does not need it
                     "buildScripts": {
-                        "enable": True,
+                        "enable": False,
                         "invocationLocation": "workspace",
                         "invocationStrategy": "per_workspace",
                         "overrideCommand": None,
@@ -534,7 +493,8 @@ class RustAnalyzer(SolidLanguageServer):
                     "target": None,
                     "unsetTest": ["core"],
                 },
-                "checkOnSave": True,
+                # Serena only navigates and edits code; it never builds or checks it
+                "checkOnSave": False,
                 "check": {
                     "allTargets": True,
                     "command": "check",
@@ -665,7 +625,8 @@ class RustAnalyzer(SolidLanguageServer):
                 "lru": {"capacity": None, "query": {"capacities": {}}},
                 "notifications": {"cargoTomlNotFound": True},
                 "numThreads": None,
-                "procMacro": {"attributes": {"enable": True}, "enable": True, "ignored": {}, "server": None},
+                # expanding procedural macros requires compiling them (and running build scripts)
+                "procMacro": {"attributes": {"enable": False}, "enable": False, "ignored": {}, "server": None},
                 "references": {"excludeImports": False},
                 "rust": {"analyzerTargetDir": None},
                 "rustc": {"source": None},
@@ -683,36 +644,6 @@ class RustAnalyzer(SolidLanguageServer):
             "trace": "verbose",
         }
         return initialize_params
-
-    @override
-    def _get_published_diagnostics_wait_timeout(self, pull_diagnostics_failed: bool) -> float:
-        timeout = super()._get_published_diagnostics_wait_timeout(pull_diagnostics_failed)
-        # Rust diagnostics are often published asynchronously after the pull-diagnostics request,
-        # so keep a wider fallback wait window across all platforms.
-        return max(timeout, 8.0)
-
-    @override
-    def request_text_document_diagnostics(
-        self,
-        relative_file_path: str,
-        start_line: int = 0,
-        end_line: int = -1,
-        min_severity: int = 4,
-    ) -> list[ls_types.Diagnostic]:
-        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
-
-        # With cache priming disabled, startup can finish before rust-analyzer
-        # schedules its initial flycheck. Trigger the retained checkOnSave path
-        # explicitly whenever diagnostics are requested.
-        with self.open_file(relative_file_path):
-            self.server.notify.did_save_text_document(
-                {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
-                    LSPConstants.TEXT_DOCUMENT: {
-                        LSPConstants.URI: uri,
-                    }
-                }
-            )
-            return super().request_text_document_diagnostics(relative_file_path, start_line, end_line, min_severity)
 
     def _start_server(self) -> None:
         """

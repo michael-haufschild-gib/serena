@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import shutil
 import tempfile
 import threading
 from abc import ABC, abstractmethod
@@ -175,76 +174,6 @@ class LanguageServerDependencyProviderSinglePath(LanguageServerDependencyProvide
                 return base_command + cmd[1:]
             else:
                 raise ValueError("Language server base launch command with arguments unsupported")
-
-
-class LanguageServerDependencyProviderUvx(LanguageServerDependencyProviderBaseCommand):
-    """
-    Dependency provider for language servers distributed as a PyPI package, run on demand via ``uvx`` / ``uv x``.
-
-    The pinned package version can be overridden by the user via the LS-specific setting given by
-    ``version_setting_key``. Alternatively, the LS-specific setting "ls_path" can be set to the path of an
-    already-installed language server executable, in which case it is launched directly, bypassing uv entirely.
-    """
-
-    DEFAULT_UVX_PYTHON_VERSION = "3.13"
-
-    def __init__(
-        self,
-        custom_settings: "SolidLSPSettings.CustomLSSettings",
-        ls_resources_dir: str,
-        *,
-        package: str,
-        entrypoint: str,
-        default_version: str,
-        version_setting_key: str,
-        extra_args: Sequence[str] = (),
-    ):
-        """
-        :param package: the PyPI package name (e.g. ``"pyright"``)
-        :param entrypoint: the console script provided by the package (e.g. ``"pyright-langserver"``)
-        :param default_version: the package version to pin unless overridden
-        :param version_setting_key: the LS-specific setting key through which the user can override the version
-        :param extra_args: arguments appended after the entrypoint (e.g. ``("--stdio",)``)
-        """
-        super().__init__(custom_settings, ls_resources_dir)
-        self._package = package
-        self._entrypoint = entrypoint
-        self._default_version = default_version
-        self._version_setting_key = version_setting_key
-        self._extra_args = tuple(extra_args)
-
-    @staticmethod
-    def _build_uvx_base_command(
-        package: str,
-        version: str,
-        entrypoint: str,
-        python_version: str = DEFAULT_UVX_PYTHON_VERSION,
-    ) -> list[str]:
-        """Build a command that runs a pinned PyPI package's console script on demand via ``uvx`` / ``uv tool run``.
-
-        :param package: PyPI package name (e.g. ``"pyright"``).
-        :param version: Pinned package version.
-        :param entrypoint: Console script provided by the package (e.g. ``"pyright-langserver"``).
-        :param python_version: Python interpreter version passed via ``-p`` (uv will fetch it if missing).
-        """
-        base_args = ["-p", python_version, "--from", f"{package}=={version}", entrypoint]
-
-        uvx_path = os.environ.get("UVX") or shutil.which("uvx")
-        if uvx_path is not None:
-            return [uvx_path, *base_args]
-
-        uv_path = shutil.which("uv")
-        if uv_path is not None:
-            return [uv_path, "tool", "run", *base_args]  # `uv tool run` is the same as `uvx`
-
-        raise RuntimeError("Could not find 'uvx' or 'uv' in PATH. Install uv (https://docs.astral.sh/uv/).")
-
-    def _create_default_base_command(self):
-        version = self._custom_settings.get(self._version_setting_key, self._default_version)
-        return self._build_uvx_base_command(self._package, version, self._entrypoint)
-
-    def _create_launch_command_from_base_command(self, base_command: list[str]) -> list[str]:
-        return base_command + list(self._extra_args)
 
 
 class DownloadedDependencyHashDatabase:

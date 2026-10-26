@@ -22,18 +22,9 @@ Given your preferred method of running Serena, you can start the MCP server usin
 
     serena start-mcp-server [options]  
 
-Note that no matter how you run the MCP server, Serena will, by default, start a web-based dashboard on localhost that will allow you to inspect
-the server's operations, logs, and configuration.
-
-:::{tip}
-By default, Serena will use language servers for code understanding and analysis.    
-With the [Serena JetBrains Plugin](025_jetbrains_plugin), we recently introduced a powerful alternative,
-which has several advantages over the language server-based approach.
-:::
-
 ### Standard I/O Mode
 
-The typical usage involves the client (e.g. Claude Code, Codex or Cursor) running
+The typical usage involves the client (e.g. Claude Code or Codex) running
 the MCP server as a subprocess and using the process' stdin/stdout streams to communicate with it.
 In order to launch the server, the client thus needs to be provided with the command to run the MCP server.
 
@@ -44,39 +35,17 @@ In other words, you do not need to start the server yourself. The client applica
 therefore needs to be configured with a launch command.
 :::
 
-Communication over stdio is the default for the Serena MCP server, so in the simplest
+Communication over stdio is the only transport supported by the Serena MCP server, so in the simplest
 case, you can simply run the `start-mcp-server` command without any additional options.
  
     serena start-mcp-server
 
-See the section ["Configuring Your MCP Client"](030_clients) for specific information on how to configure your MCP client (e.g. Claude Code, Codex, Cursor, etc.)
+See the section ["Configuring Your MCP Client"](030_clients) for specific information on how to configure your MCP client (e.g. Claude Code, Codex, Claude Desktop, etc.)
 to use such a launch command.
 
-(streamable-http)=
-### Streamable HTTP Mode
-
-When using *Streamable HTTP* mode, you control the server lifecycle yourself,
-i.e. you start the server and provide the client with the URL to connect to it.
-
-Simply provide `start-mcp-server` with the `--transport streamable-http` option and optionally provide the desired port
-via the `--port` option.
-For example, to start the server on port 9121, run
-
-    serena start-mcp-server --transport streamable-http --port <port>
-
-and then configure your client to connect to `http://localhost:9121/mcp`.
-
-By default, only connections from localhost are allowed; pass the `--host <listen_address>` option to configure
-the listen address and allow remote connections if needed (but be aware of the security implications of doing so).
-
-**When to use.** Note that Serena is a stateful MCP server, and only one coding project can be active at a time.
-Therefore, starting a single Serena instance and connecting it to multiple clients is only 
-appropriate if all clients will be working on the same project.  
-If you want several agents to work on different projects, making each client/agent start its own server
-in stdio mode is likely the best option.
+Note that Serena is a stateful MCP server, and only one coding project can be active at a time.
+If you want several agents to work on different projects, each client/agent starts its own server.
 See section [The Project Workflow](040_workflow) for more information on how to manage projects in Serena.
-
-The legacy SSE transport is also supported (via `--transport sse` with corresponding /sse endpoint), its use is discouraged.
 
 (mcp-args)=
 ### MCP Server Command-Line Arguments
@@ -97,10 +66,8 @@ Some useful options include:
     to the worktree itself rather than the ancestor project.
     This option is intended for CLI-based agents like Claude Code, Gemini and Codex, which are typically started from within the project directory
     and which do not change directories during their operation.
-  * `--language-backend JetBrains`: use the Serena JetBrains Plugin as the language backend (overriding the default backend configured in the central configuration)
   * `--context <context>`: specify the operation [context](contexts) in which Serena shall operate
   * `--mode <mode>`: specify one or more [modes](modes) to enable (can be passed several times)
-  * `--open-web-dashboard <true|false>`: whether to open the web dashboard on startup (enabled by default)
 
 ## Other Commands
 
@@ -221,39 +188,3 @@ If, however, the synchronisation is fast enough for you, this is still a good op
 Adding the `--directory` option results in the working directory being set to the Serena directory.
 As a consequence, you will need to specify paths when using CLI commands that would otherwise operate on the current directory.
 :::
-
-(docker)=
-### Using Docker
-
-The Docker approach offers several advantages:
-
-* better security isolation for shell command execution
-* no need to install language servers and dependencies locally
-* consistent environment across different systems
-
-You can run the Serena MCP server directly via Docker as follows,
-assuming that the projects you want to work on are all located in `/path/to/your/projects`:
-
-```shell
-docker run --rm -i --network host -v /path/to/your/projects:/workspaces/projects ghcr.io/oraios/serena:latest serena 
-```
-
-This command mounts your projects into the container under `/workspaces/projects`, so when working with projects,
-you need to refer to them using the respective path (e.g. `/workspaces/projects/my-project`).
-
-Alternatively, you may use Docker compose. Adjust the file `compose.yml`, which is provided in the repository, according to your needs.
-See our [advanced Docker usage](https://github.com/oraios/serena/blob/main/DOCKER.md) documentation for more detailed instructions, configuration options, and limitations.
-
-:::{note}
-Docker usage is subject to limitations; see the [advanced Docker usage](https://github.com/oraios/serena/blob/main/DOCKER.md) documentation for details.
-:::
-
-### Using Nix to Run the Latest Source Version
-
-If you are using Nix and [have enabled the `nix-command` and `flakes` features](https://nixos.wiki/wiki/flakes), you can run Serena using the following command:
-
-```bash
-nix run github:oraios/serena -- <command> [options]
-```
-
-You can also install Serena by referencing this repo (`github:oraios/serena`) and using it in your Nix flake. The package is exported as `serena`.
