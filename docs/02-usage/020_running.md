@@ -43,9 +43,28 @@ case, you can simply run the `start-mcp-server` command without any additional o
 See the section ["Configuring Your MCP Client"](030_clients) for specific information on how to configure your MCP client (e.g. Claude Code, Codex, Claude Desktop, etc.)
 to use such a launch command.
 
-Note that Serena is a stateful MCP server, and only one coding project can be active at a time.
-If you want several agents to work on different projects, each client/agent starts its own server.
+Note that Serena is a stateful MCP server, and only one coding project can be active per session.
 See section [The Project Workflow](040_workflow) for more information on how to manage projects in Serena.
+
+(shared-server)=
+### Sessions Share One Server per Project
+
+When a session is started for a project (`--project` or `--project-from-cwd`), the `start-mcp-server` process
+hands the session over to the project's *shared server* and turns into a small relay between the client and that
+server. All sessions on the same project (e.g. several chats) are served by the same server, so they share one
+set of language servers. Each session keeps its own context, modes and tools. The shared server is started by the
+first session and exits once it has had no session for `ls_idle_timeout` seconds (see the
+[configuration](050_configuration)); its log is written to `~/.serena/logs/<date>/shared-server_*.txt`.
+
+Tool calls of all sessions on a project are executed one at a time, so a long-running call in one session delays
+the calls of the others.
+
+Pass `--no-shared-server` to serve a session in its own process instead; sessions without a project are always
+served in their own process.
+
+Language servers are started when a tool first needs them and are stopped after `ls_idle_timeout` seconds without
+use. Serena never leaves language servers behind: they are terminated when Serena exits, including when it is
+killed, and a session's process exits when its client goes away.
 
 (mcp-args)=
 ### MCP Server Command-Line Arguments
@@ -68,6 +87,7 @@ Some useful options include:
     and which do not change directories during their operation.
   * `--context <context>`: specify the operation [context](contexts) in which Serena shall operate
   * `--mode <mode>`: specify one or more [modes](modes) to enable (can be passed several times)
+  * `--no-shared-server`: serve the session in this process instead of the project's [shared server](shared-server)
 
 ## Other Commands
 

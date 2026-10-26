@@ -62,5 +62,12 @@ the language server is restarted.
 
 ## Unreal Engine projects
 
-For Unreal Engine 5 projects (reflection macros, UnrealBuildTool), see the
-[Unreal Engine Setup Guide](unreal_engine_setup_guide_for_serena.md).
+For Unreal Engine 5 projects (reflection macros, UnrealBuildTool), clangd needs a compilation database.
+Build the editor target once, then generate the database with UnrealBuildTool:
+
+```
+<Engine>/Build/BatchFiles/Mac/Build.sh <Proj>Editor Mac Development -project="<Proj>.uproject" -mode=GenerateClangDatabase -OutputDir="<projectDir>"
+```
+
+Serena ignores the engine's build and cache directories (`Binaries`, `DerivedDataCache`, `Intermediate`, `Saved`)
+in Unreal Engine projects.

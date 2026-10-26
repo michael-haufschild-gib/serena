@@ -13,6 +13,14 @@
 </div>
 <br>
 
+> [!NOTE]
+> **This is a private, macOS-only fork.** It keeps Serena's language-server navigation/editing tools and memories
+> for TypeScript/JavaScript, Python, Java, C/C++, Rust, Swift, Lean 4, YAML and TOML, and is built to be light:
+> language servers start on first use and stop when idle, all chats on a project share one server, nothing is left
+> running when a chat ends, and Serena never builds, checks or diagnoses code. The dashboard, JetBrains backend,
+> HTTP transports, diagnostics and shell tools of upstream Serena are not part of it.
+> Parts of the documentation below still describe upstream Serena.
+
 
 * Serena provides essential **semantic code retrieval, editing and refactoring tools** that are akin to an IDE's capabilities,
   operating at the symbol level and exploiting relational structure.

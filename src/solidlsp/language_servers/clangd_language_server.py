@@ -121,13 +121,11 @@ class ClangdLanguageServer(SolidLanguageServer):
             f"No usable compile_commands.json at {self.repository_root_path}, but this looks like an "
             "Unreal Engine project (.uproject present). clangd needs a non-empty compilation database "
             "to resolve engine headers and macros.\n\n"
-            "Generate one from the engine's <Engine>\\Binaries\\DotNET\\UnrealBuildTool\\ directory:\n"
-            '  UnrealBuildTool.exe -mode=GenerateClangDatabase -project="<Proj>.uproject" '
-            '<Proj>Editor Win64 Development -OutputDir="<projectDir>"\n'
-            "Without a clang toolchain, append -Compiler=VisualStudio2022 to build an MSVC database instead.\n\n"
+            "Generate one with UnrealBuildTool:\n"
+            '  <Engine>/Build/BatchFiles/Mac/Build.sh <Proj>Editor Mac Development -project="<Proj>.uproject" '
+            '-mode=GenerateClangDatabase -OutputDir="<projectDir>"\n\n'
             "Build the editor target once first so the generated headers exist. After creating the "
-            "database, reconnect or restart Serena's MCP so the language server re-checks for it.\n"
-            "See docs/03-special-guides/unreal_engine_setup_guide_for_serena.md for details."
+            "database, reconnect or restart Serena's MCP so the language server re-checks for it."
         )
 
     def _prepare_compile_commands(self) -> str | None:

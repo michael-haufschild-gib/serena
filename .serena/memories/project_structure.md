@@ -1,20 +1,32 @@
 # Serena — Project Core
 
-Serena is an MCP-based "IDE for coding agents": semantic code retrieval/editing/refactoring tools driven by language servers.
+Serena is an MCP server giving coding agents lightweight, language-server-based code navigation and editing,
+plus memories. This is a private, macOS-only fork (never merged upstream). Serena never builds, checks or
+diagnoses code: there are no diagnostics tools, no shell tool, and language servers are configured not to build
+(no `cargo check`, no JDTLS autobuild, pyright type checking off).
 
 ## Source map
 
 - `src/serena/` — agent, MCP server, tools, project/config layer
-  - `agent.py`, `mcp.py`, `project_server.py`, `cli.py`, `hooks.py` — entrypoints/wiring
-  - `tools/` — tool implementations (memory_tools, symbol_tools, file_tools, workflow_tools, query_project_tools, config_tools, cmd_tools, jetbrains_tools)
-  - `tools/tools_base.py` — base classes for all tools
+  - `cli.py` — CLI; `start-mcp-server` execs into the shared-server launcher for project sessions
+  - `shared_server.py` — stdlib-only launcher: connects a session's stdio to the project's shared server
+    (Unix socket in `$TMPDIR/serena-shared-servers/`), starting it under a lock if needed
+  - `project_daemon.py` — the shared server: one `Project` + one `TaskExecutor` per project, one `SerenaAgent`
+    per session; exits after `ls_idle_timeout` without sessions
+  - `agent.py`, `mcp.py`, `project.py`, `project_server.py`, `hooks.py` — wiring
+  - `ls_manager.py` — language servers start on first use, stop after `ls_idle_timeout` without use
+  - `util/process_lifecycle.py` — clean shutdown on SIGTERM/SIGHUP/SIGINT and on parent exit (kqueue)
+  - `tools/` — tool implementations (memory, symbol, file, workflow, query_project, config tools)
   - `config/` — `serena_config.py`, `context_mode.py`, `client_setup.py`
   - `resources/config/contexts/*.yml`, `resources/config/modes/*.yml` — context/mode definitions
-  - `code_editor.py`, `symbol.py`, `ls_manager.py` — symbolic editing / LS lifecycle
-  - `dashboard.py`, `gui_log_viewer.py` — web dashboard / log viewer
   - `prompt_factory.py` + `generated/generated_prompt_factory.py` — prompts (regenerate with `scripts/gen_prompt_factory.py`)
-- `src/solidlsp/` — LSP client framework; per-language servers under `language_servers/`
-- `src/interprompt/` — prompt template library (synced from external repo; see `.syncCommitId.*`)
+- `src/solidlsp/` — LSP client framework; language servers under `language_servers/` for cpp (clangd), java (JDTLS),
+  lean4, python (pyright via npm), rust (rust-analyzer), swift (sourcekit-lsp), toml (taplo), typescript, yaml
+  - `util/subprocess_util.py` — every language server runs in its own process group, registered with a `/bin/sh`
+    watcher (`ProcessGroupReaper`) that kills the groups when Serena dies, even by SIGKILL
+  - `util/cache.py` — `PersistentSymbolCache`: per-file SQLite symbol caches with a small in-memory LRU, shared
+    safely by concurrent processes and written immediately
+- `src/interprompt/` — prompt template library
 - `test/serena/`, `test/solidlsp/<lang>/` — pytest suites; per-language tests gated by pytest markers
 - `test/resources/repos/<lang>/` — fixture projects used by language-server tests
 - `scripts/` — utilities (prompt regen, tool overview, profiling, agno agent)
@@ -22,6 +34,9 @@ Serena is an MCP-based "IDE for coding agents": semantic code retrieval/editing/
 
 ## Project-wide invariants
 
-- Package name (PyPI): `serena-agent`; Wheel includes `serena`, `interprompt`, `solidlsp`.
+- macOS only: no Windows/Linux code paths; `ty` checks with `python-platform = "darwin"`.
+- Removed config keys, tool names and CLI flags (dashboard, JetBrains, transports, diagnostics, activation command,
+  shell tool) are still accepted and ignored, so existing configs and client launch commands keep working.
+- Package name: `serena-agent`; wheel includes `serena`, `interprompt`, `solidlsp`.
 - Python: `>=3.11, <3.15`. Dependencies are exact-pinned in `pyproject.toml` (uvx installs from git, lockfile ignored — pin exactly).
 - Entry points: `serena` → `serena.cli:top_level`; `serena-hooks` → `serena.hooks:hook_commands`.
