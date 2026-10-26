@@ -1,6 +1,7 @@
 import os
 import re
 import shutil as _sh
+import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 
 import pytest
 from _pytest.mark import Mark, MarkDecorator
+from filelock import FileLock
 from sensai.util import logging
 
 from serena.agent import SerenaAgent
@@ -24,6 +26,20 @@ PYTEST_LOG_LEVEL = logging.DEBUG
 logging.configure(level=PYTEST_LOG_LEVEL)
 
 log = logging.getLogger(__name__)
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """
+    Builds the Lean 4 fixture project if Lean tests are about to run: the Lean language server only resolves
+    references across files from the build outputs (``.ilean``) of the modules involved.
+    """
+    if _sh.which("lake") is None or not any(item.get_closest_marker("lean4") for item in session.items):
+        return
+    repo_path = get_repo_path(LanguageServerId.LEAN4)
+    with FileLock(str(repo_path / ".lake-build.lock")):  # pytest-xdist workers may get here concurrently
+        result = subprocess.run(["lake", "build"], cwd=repo_path, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        log.warning(f"Building the Lean 4 fixture project failed:\n{result.stdout}\n{result.stderr}")
 
 
 def pytest_configure(config: pytest.Config) -> None:
