@@ -5,7 +5,6 @@ The Serena Model Context Protocol (MCP) Server
 import json
 import os
 import platform
-import signal
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -341,6 +340,8 @@ class SerenaAgent:
         serena_config: SerenaConfig | None = None,
         context: SerenaAgentContext | None = None,
         modes: ModeSelectionDefinition | None = None,
+        shared_project: Project | None = None,
+        task_executor: TaskExecutor | None = None,
     ):
         """
         :param project: the project to load immediately or None to not load any project; may be a path to the project or a name of
@@ -352,8 +353,14 @@ class SerenaAgent:
         :param context: the context in which the agent is operating, None for default context.
             The context may adjust prompts, tool availability, and tool descriptions.
         :param modes: mode selection definition to apply for this session
+        :param shared_project: a project that is shared with other agents (in place of ``project``); it is activated
+            immediately, and this agent never switches away from it or shuts it down
+        :param task_executor: the executor through which tasks (in particular tool calls) are run; agents sharing a
+            project must share the executor, so that their accesses to the project's language servers are serialised.
+            If None, the agent uses its own executor.
         """
         self._active_project: Project | None = None  # NOTE: field name used in __del__
+        self._owns_active_project = shared_project is None
         self._project_activation_callback = project_activation_callback
         self._project_activation_error: str | None = project_activation_error
         self._project_prompt_status = ProjectPromptProvisionStatus()
@@ -395,7 +402,7 @@ class SerenaAgent:
 
         # create executor for starting the language server and running tools in another thread
         # This executor is used to achieve linear task execution
-        self._task_executor = TaskExecutor("SerenaAgentTaskExecutor")
+        self._task_executor = task_executor or TaskExecutor("SerenaAgentTaskExecutor")
 
         # Initialize the prompt factory
         self.prompt_factory = SerenaPromptFactory()
@@ -407,7 +414,9 @@ class SerenaAgent:
         # activate the given project (if any), also updating the active modes
         # Note: We cannot update the active tools yet, because the base toolset has not been computed yet
         #       (and its computation depends on the active project)
-        if project is not None:
+        if shared_project is not None:
+            self._activate_project(shared_project, update_active_modes=False, update_active_tools=False)
+        elif project is not None:
             try:
                 self.activate_project_from_path_or_name(project, update_active_modes=False, update_active_tools=False)
             except Exception as e:
@@ -809,6 +818,9 @@ class SerenaAgent:
 
         self._project_activation_error = None
 
+        if self._active_project is not None and not self._owns_active_project:
+            raise ValueError(f"This agent is bound to the shared project '{self._active_project}' and cannot switch projects")
+
         # shut down the previously active project to release its language server processes
         if self._active_project is not None:
             log.info(f"Shutting down previously active project '{self._active_project.project_name}' before switching")
@@ -830,8 +842,9 @@ class SerenaAgent:
             self._update_active_tools()
 
         # create the project's language server manager in the background (it may have to wait for the project
-        # configuration to be generated); the language servers themselves are only started on first use
-        self.issue_task(self.reset_language_server_manager, name="CreateLanguageServerManager")
+        # configuration to be generated), unless the (shared) project already has one; the language servers
+        # themselves are only started on first use
+        self.issue_task(project.get_or_create_language_server_manager, name="CreateLanguageServerManager")
 
         if self._project_activation_callback is not None:
             self._project_activation_callback()
@@ -971,20 +984,10 @@ class SerenaAgent:
         Shutdown handler of the agent, freeing resources and stopping background tasks.
         """
         log.info("SerenaAgent is shutting down ...")
-        if self._active_project is not None:
+        if self._active_project is not None and self._owns_active_project:
             log.info(f"Shutting down active project '{self._active_project.project_name}' ...")
             self._active_project.shutdown(timeout=timeout)
             self._active_project = None
-
-    def shutdown(self) -> None:
-        """
-        Triggers a hard shutdown of the agent, freeing resources and signalling the process to terminate
-        """
-        # perform clean-up right away, because kill does not result in normal deletion of the object
-        self.on_shutdown()
-
-        # signal process termination
-        os.kill(os.getpid(), signal.SIGTERM)
 
     def get_tool_by_name(self, tool_name: str) -> Tool:
         tool_class = ToolRegistry().get_tool_class_by_name(tool_name)

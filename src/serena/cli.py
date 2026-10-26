@@ -35,6 +35,7 @@ from serena.constants import (
     SERENAS_OWN_MODE_YAMLS_DIR,
 )
 from serena.prompt_factory import SerenaPromptFactory
+from serena.shared_server import SharedServerRequest
 from serena.tools import ActivateProjectTool
 from serena.util.cli_util import AutoRegisteringGroup
 from solidlsp.ls_config import LanguageServerId
@@ -57,6 +58,17 @@ be added on top of the other modes specified by the global/project configuration
 For details on mode configuration, see 
   https://oraios.github.io/serena/02-usage/050_configuration.html#modes.
 """
+
+
+def _resolve_project_root(project: str) -> str | None:
+    """
+    :param project: a project directory or the name of a registered project
+    :return: the project's root directory, or None if it cannot be determined
+    """
+    if os.path.isdir(project):
+        return os.path.abspath(project)
+    registered_project = SerenaConfig.from_config_file().get_registered_project(project)
+    return str(registered_project.project_root) if registered_project is not None else None
 
 
 def find_project_root(root: str | Path | None = None) -> str | None:
@@ -296,6 +308,13 @@ class TopLevelCommands(AutoRegisteringGroup):
         default=False,
         help="Auto-detect project from current working directory (nearest ancestor containing .serena/project.yml or .git). If none is found, no project is activated. Intended for CLI-based agents like Claude Code, Gemini and Codex.",
     )
+    @click.option(
+        "--shared-server/--no-shared-server",
+        default=True,
+        show_default=True,
+        help="Serve the session from the project's shared server, which all sessions on the project use, so that they share "
+        "one set of language servers. Without a project, or with --no-shared-server, the session is served by this process.",
+    )
     def start_mcp_server(
         project: str | None,
         project_file_arg: str | None,
@@ -310,6 +329,7 @@ class TopLevelCommands(AutoRegisteringGroup):
         log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None,
         trace_lsp_communication: bool | None,
         tool_timeout: float | None,
+        shared_server: bool,
     ) -> None:
         from serena.mcp import SerenaMCPFactory
         from serena.util.process_lifecycle import ProcessLifecycle
@@ -348,6 +368,23 @@ class TopLevelCommands(AutoRegisteringGroup):
                 log.warning(project_activation_error)
 
         project_file = project_file_arg or project
+
+        # hand the session over to the project's shared server, replacing this process with the lightweight launcher
+        if shared_server and project_file is not None:
+            project_root = _resolve_project_root(project_file)
+            if project_root is not None:
+                request = SharedServerRequest(
+                    project_root=project_root,
+                    context=context,
+                    modes=list(default_modes),
+                    added_modes=list(added_modes),
+                    log_level=log_level,
+                    trace_lsp_communication=trace_lsp_communication,
+                    tool_timeout=tool_timeout,
+                )
+                log.info("Handing the session over to the shared server of %s", project_root)
+                logging.shutdown()
+                os.execv(sys.executable, [sys.executable, "-m", "serena.shared_server", request.to_json()])
 
         mode_selection_def: ModeSelectionDefinition | None = None
         if default_modes or added_modes:

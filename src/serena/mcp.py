@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import docstring_parser
 from mcp.server.fastmcp import server
@@ -28,6 +28,10 @@ from serena.config.serena_config import ModeSelectionDefinition, SerenaConfig
 from serena.constants import DEFAULT_CONTEXT, SERENA_LOG_FORMAT
 from serena.tools import Tool, ToolCallError
 from serena.util.exception import report_fatal_exception
+
+if TYPE_CHECKING:
+    from serena.project import Project
+    from serena.task_executor import TaskExecutor
 
 log = logging.getLogger(__name__)
 
@@ -154,15 +158,22 @@ class SerenaMCPFactory:
         self,
         context: str = DEFAULT_CONTEXT,
         project: str | None = None,
+        shared_project: "Project | None" = None,
+        task_executor: "TaskExecutor | None" = None,
     ):
         """
         :param context: The context name or path to context file
         :param project: Either an absolute path to the project directory or a name of an already registered project.
             If the project passed here hasn't been registered yet, it will be registered automatically and can be activated by its name
             afterward.
+        :param shared_project: a project shared with the agents of other MCP sessions (in place of ``project``),
+            see :class:`SerenaAgent`
+        :param task_executor: the task executor shared with the agents of other MCP sessions, see :class:`SerenaAgent`
         """
         self.context = SerenaAgentContext.load(context)
         self.project = project
+        self._shared_project = shared_project
+        self._task_executor = task_executor
         self.agent: SerenaAgent | None = None
 
     @staticmethod
@@ -313,6 +324,8 @@ class SerenaMCPFactory:
             context=self.context,
             modes=modes,
             project_activation_error=project_activation_error,
+            shared_project=self._shared_project,
+            task_executor=self._task_executor,
         )
 
     def create_mcp_server(

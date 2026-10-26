@@ -1,6 +1,7 @@
 """
-End-to-end tests of the guarantee that a Serena MCP server never leaves language servers behind: when it is
-asked to terminate, and when the process that launched it goes away without telling it.
+End-to-end tests of the process lifecycle of Serena MCP sessions: a session served in-process never leaves
+language servers behind, and sessions on the same project share one server (and thus one set of language servers),
+which exits once it has been idle.
 """
 
 import json
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import psutil
@@ -57,18 +59,36 @@ def _wait_until_gone(processes: list[psutil.Process], timeout: float = 15.0) -> 
     return alive
 
 
+def _shared_servers(project_root: Path) -> list[psutil.Process]:
+    result = []
+    for p in psutil.process_iter(["cmdline"]):
+        cmdline = " ".join(p.info["cmdline"] or [])
+        if "serena.project_daemon" in cmdline and str(project_root) in cmdline:
+            result.append(p)
+    return result
+
+
 @pytest.fixture
-def serena_env(tmp_path: Path) -> tuple[dict[str, str], Path]:
+def serena_env(tmp_path: Path) -> Iterator[tuple[dict[str, str], Path]]:
     project_root = tmp_path / "project"
     shutil.copytree(get_repo_path(LanguageServerId.PYTHON), project_root)
-    env = dict(os.environ, SERENA_HOME=str(tmp_path / "serena_home"))
-    return env, project_root
+    serena_home = tmp_path / "serena_home"
+    serena_home.mkdir()
+    (serena_home / "serena_config.yml").write_text("projects: []\nls_idle_timeout: 2\n")
+    env = dict(os.environ, SERENA_HOME=str(serena_home))
+    yield env, project_root
+    for server in _shared_servers(project_root):
+        for p in [*server.children(recursive=True), server]:
+            try:
+                p.kill()
+            except psutil.NoSuchProcess:
+                pass
 
 
-def _start_serena_with_running_language_server(cmd_prefix: list[str], env: dict[str, str], project_root: Path) -> subprocess.Popen:
+def _start_session(env: dict[str, str], project_root: Path, shared_server: bool, cmd_prefix: Sequence[str] = ()) -> subprocess.Popen:
     """
-    Starts Serena (possibly via a wrapper process, given by ``cmd_prefix``) on the project and makes a tool call that
-    starts the language server.
+    Starts an MCP session (possibly via a wrapper process, given by ``cmd_prefix``) on the project and makes a tool call
+    that requires the language server.
     """
     serena_cmd = [
         str(Path(sys.executable).parent / "serena"),
@@ -77,9 +97,10 @@ def _start_serena_with_running_language_server(cmd_prefix: list[str], env: dict[
         "claude-code",
         "--project",
         str(project_root),
+        "--shared-server" if shared_server else "--no-shared-server",
     ]
     proc = subprocess.Popen(
-        cmd_prefix + serena_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, cwd=project_root
+        [*cmd_prefix, *serena_cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, cwd=project_root
     )
     _rpc(
         proc,
@@ -92,18 +113,22 @@ def _start_serena_with_running_language_server(cmd_prefix: list[str], env: dict[
     )
     _read_response(proc, 1)
     _rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    _call_symbols_overview(proc, request_id=2)
+    return proc
+
+
+def _call_symbols_overview(proc: subprocess.Popen, request_id: int) -> None:
     _rpc(
         proc,
         {
             "jsonrpc": "2.0",
-            "id": 2,
+            "id": request_id,
             "method": "tools/call",
             "params": {"name": "get_symbols_overview", "arguments": {"relative_path": "test_repo/models.py"}},
         },
     )
-    response = _read_response(proc, 2)
+    response = _read_response(proc, request_id)
     assert "User" in json.dumps(response), f"the tool call did not reach the language server: {response}"
-    return proc
 
 
 def _find_serena_pid(proc: subprocess.Popen) -> int:
@@ -113,9 +138,9 @@ def _find_serena_pid(proc: subprocess.Popen) -> int:
     raise AssertionError("Serena process not found")
 
 
-def test_terminated_serena_stops_its_language_servers(serena_env: tuple[dict[str, str], Path]) -> None:
+def test_terminated_in_process_serena_stops_its_language_servers(serena_env: tuple[dict[str, str], Path]) -> None:
     env, project_root = serena_env
-    proc = _start_serena_with_running_language_server([], env, project_root)
+    proc = _start_session(env, project_root, shared_server=False)
     try:
         language_server_processes = _descendants(proc.pid)
         assert language_server_processes, "expected a running language server"
@@ -129,7 +154,7 @@ def test_terminated_serena_stops_its_language_servers(serena_env: tuple[dict[str
             proc.kill()
 
 
-def test_serena_exits_when_its_parent_dies(serena_env: tuple[dict[str, str], Path]) -> None:
+def test_in_process_serena_exits_when_its_parent_dies(serena_env: tuple[dict[str, str], Path]) -> None:
     """
     An MCP client that kills only the launcher (e.g. ``uvx``) never closes Serena's stdin; Serena must notice
     that its parent is gone and shut down, taking its language servers with it.
@@ -146,7 +171,7 @@ def test_serena_exits_when_its_parent_dies(serena_env: tuple[dict[str, str], Pat
             """
         ),
     ]
-    proc = _start_serena_with_running_language_server(wrapper, env, project_root)
+    proc = _start_session(env, project_root, shared_server=False, cmd_prefix=wrapper)
     try:
         serena = psutil.Process(_find_serena_pid(proc))
         language_server_processes = _descendants(serena.pid)
@@ -162,3 +187,48 @@ def test_serena_exits_when_its_parent_dies(serena_env: tuple[dict[str, str], Pat
             p.kill()
         if proc.poll() is None:
             proc.kill()
+
+
+def _language_server_processes(server: psutil.Process) -> list[psutil.Process]:
+    return [p for p in server.children(recursive=True) if "pyright" in " ".join(p.cmdline())]
+
+
+def test_sessions_on_a_project_share_one_language_server(serena_env: tuple[dict[str, str], Path]) -> None:
+    env, project_root = serena_env
+    first = _start_session(env, project_root, shared_server=True)
+    second = _start_session(env, project_root, shared_server=True)
+    try:
+        servers = _shared_servers(project_root)
+        assert len(servers) == 1, f"expected one shared server, found {servers}"
+        assert len(_language_server_processes(servers[0])) == 1, "the sessions must share one language server"
+    finally:
+        for proc in (first, second):
+            proc.kill()
+
+
+def test_a_killed_session_does_not_affect_the_other_sessions(serena_env: tuple[dict[str, str], Path]) -> None:
+    env, project_root = serena_env
+    first = _start_session(env, project_root, shared_server=True)
+    second = _start_session(env, project_root, shared_server=True)
+    try:
+        first.kill()
+        first.wait(timeout=5)
+
+        _call_symbols_overview(second, request_id=3)
+    finally:
+        second.kill()
+
+
+def test_the_shared_server_exits_once_it_has_no_sessions(serena_env: tuple[dict[str, str], Path]) -> None:
+    env, project_root = serena_env
+    proc = _start_session(env, project_root, shared_server=True)
+    (server,) = _shared_servers(project_root)
+    language_server_processes = _language_server_processes(server)
+    assert language_server_processes
+
+    assert proc.stdin is not None
+    proc.stdin.close()  # the client ends the session
+    proc.wait(timeout=10)
+
+    assert server.is_running(), "the shared server must outlive a session"
+    assert not _wait_until_gone([server, *language_server_processes], timeout=30), "the idle shared server did not exit"

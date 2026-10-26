@@ -465,6 +465,14 @@ class Project(ToStringMixin):
             source_file_path=relative_file_path,
         )
 
+    def get_or_create_language_server_manager(self) -> LanguageServerManager:
+        """
+        :return: the project's language server manager, which is created if it does not exist yet
+        """
+        if self.language_server_manager is not None:
+            return self.language_server_manager
+        return self.create_language_server_manager()
+
     def create_language_server_manager(self) -> LanguageServerManager:
         """
         Creates the language server manager for the project, which starts the language servers of the configured
